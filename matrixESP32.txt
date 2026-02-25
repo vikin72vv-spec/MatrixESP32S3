@@ -19,7 +19,7 @@
 #define SD_MISO 40  
 
 // ================= TELEGRAM БОТ =================
-String tgToken = "твой ключ";
+String tgToken = "8231470801:AAGfa479WYby3h2iFNDOQVisE1b75tCA1eY";
 long lastTgUpdateId = 0;
 unsigned long lastTgCheck = 0;
 volatile bool newTelegramMessage = false;
@@ -460,7 +460,7 @@ void handleRoot() {
   s += drawToggle("scu", "Экран: Валюта", showCurrencyFlag, currencyShowSec, "tcu");
   s += drawToggle("sco", "Экран: Событие", showCountdownFlag, countdownShowSec, "tco");
   s += "<hr style='border:none;border-top:1px solid #333;margin:15px 0'>";
-  s += drawToggle("snews", "🌍 Новости (раз в 2 мин)", showNewsFlag, 0, "");
+  s += drawToggle("snews", "🌍 Новости (раз в 10 мин)", showNewsFlag, 0, "");
   
   s += "<span>Скорость новостей:</span><input type='range' name='nsp' min='10' max='65' value='" + String(75 - newsScrollSpeed) + "'>";
   s += "<div class='row'><span>Смена экранов:</span> <select name='at' style='width:auto;flex:1;margin-left:10px;margin-bottom:0;'>";
@@ -879,7 +879,7 @@ void loop() {
 
   if (showEnvelopeAnim) {
     if (millis() - envelopeAnimStart > 2500) { showEnvelopeAnim = false; isNewsScrolling = false; updateTextWidth(); currentScrollMode = SCROLL_ONCE; scrollX = 128; }
-  } else if (showNewsFlag && currentScrollMode == SCROLL_NONE && (ms - lastNewsShowTime > 120000)) {
+  } else if (showNewsFlag && currentScrollMode == SCROLL_NONE && (ms - lastNewsShowTime > 600000)) {
     if (newsText.length() > 20) { isNewsScrolling = true; currentText = newsText; updateTextWidth(); currentScrollMode = SCROLL_ONCE; scrollX = 128; lastNewsShowTime = ms; }
   }
 
