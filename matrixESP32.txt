@@ -19,7 +19,7 @@
 #define SD_MISO 40  
 
 // ================= TELEGRAM БОТ =================
-String tgToken = "8231470801:AAGfa479WYby3h2iFNDOQVisE1b75tCA1eY";
+String tgToken = "твой ключ";
 long lastTgUpdateId = 0;
 unsigned long lastTgCheck = 0;
 volatile bool newTelegramMessage = false;
