@@ -1,0 +1,920 @@
+#include <SPI.h>
+#include <SD.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <WebServer.h>
+#include <ArduinoOTA.h>
+#include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+#include <U8g2_for_Adafruit_GFX.h>
+#include <time.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <HTTPUpdate.h>
+#include <WiFiManager.h> // <--- НОВАЯ БИБЛИОТЕКА
+
+// ================= НАСТРОЙКИ SD КАРТЫ =================
+#define SD_CS 41    
+#define SD_MOSI 42  
+#define SD_SCK 39   
+#define SD_MISO 40  
+
+// ================= TELEGRAM БОТ =================
+String tgToken = "8231470801:AAGfa479WYby3h2iFNDOQVisE1b75tCA1eY";
+long lastTgUpdateId = 0;
+unsigned long lastTgCheck = 0;
+volatile bool newTelegramMessage = false;
+
+// Анимация конверта Telegram
+bool showEnvelopeAnim = false;
+unsigned long envelopeAnimStart = 0;
+
+// ================= ОБНОВЛЕНИЕ С GITHUB =================
+const float FIRMWARE_VERSION = 1.0;
+String githubRepo = "vikin72vv-spec/MatrixESP32S3";
+volatile bool triggerGitHubUpdate = false;
+unsigned long lastGitHubCheck = 0;
+
+// ================= ПИНЫ МАТРИЦЫ =================
+#define R1_PIN 10
+#define G1_PIN 11
+#define B1_PIN 12
+#define R2_PIN 13
+#define G2_PIN 14
+#define B2_PIN 15
+#define A_PIN 4
+#define B_PIN 5
+#define C_PIN 6
+#define D_PIN 7
+#define E_PIN 16
+#define LAT_PIN 17
+#define OE_PIN 18
+#define CLK_PIN 8
+
+#define PANEL_RES_X 128
+#define PANEL_RES_Y 64
+MatrixPanel_I2S_DMA *dma_display = nullptr;
+U8G2_FOR_ADAFRUIT_GFX u8g2_fonts;
+WebServer server(80);
+
+// ================= ПЕРЕМЕННЫЕ =================
+String currentText = "Жду сообщений!";
+String currentTemp = "--", currentWeatherDesc = "Загрузка...", weatherIconCode = "01d";
+String currentWind = "--", currentHumidity = "--", currentFeelsLike = "--";
+String currentUsdRate = "--.--", currentEurRate = "--.--";
+
+int forecastTemps[6] = { 0, 0, 0, 0, 0, 0 };
+bool forecastLoaded = false;
+
+bool showNewsFlag = false;
+String newsText = "Загрузка новостей...";
+unsigned long lastNewsShowTime = 0;
+int newsScrollSpeed = 30;  
+bool isNewsScrolling = false;
+
+uint16_t clockColor, textColor, dateColor;
+String clockColorHex = "#00FFFF", textColorHex = "#00FF00", dateColorHex = "#969696";
+
+int currentBrightness = 80, appliedBrightness = -1;
+bool nightModeAuto = true, isLargeText = true;
+
+enum ScrollMode { SCROLL_NONE, SCROLL_ONCE, SCROLL_LOOP };
+ScrollMode currentScrollMode = SCROLL_NONE;
+
+int scrollX = 128, textWidth = 0, scrollSpeed = 25;
+unsigned long lastScrollUpdate = 0;
+
+bool showClockFlag = true, showWeatherFlag = true, showExtWeatherFlag = true, showCurrencyFlag = true, showCountdownFlag = true, showGraphFlag = true;
+int clockShowSec = 15, weatherShowSec = 4, extWeatherShowSec = 4, currencyShowSec = 4, countdownShowSec = 4, graphShowSec = 5;
+
+// === АНИМАЦИИ СМЕНЫ ЭКРАНОВ ===
+int animType = 6; 
+int activeAnimType = 0; 
+
+int activeScreens[6];
+int numActiveScreens = 0, currentScreenIdx = 0, nextScreenIdx = 0;
+bool isAnimating = false;
+unsigned long lastSwitchTime = 0, animStartTime = 0;
+const int animDuration = 450;
+
+unsigned long timerEndTime = 0;
+bool timerActive = false, timerAlert = false;
+int timerMinutesInput = 1;
+
+String countdownTargetDate = "2027-01-01";
+String countdownEventName = "до нового года";
+int daysRemaining = 0;
+
+unsigned long lastDataUpdate = 0;
+bool dataLoaded = false;
+const char *daysOfWeek[] = { "Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота" };
+
+struct tm globalTimeInfo;
+bool globalTimeOk = false;
+unsigned long lastTimeCheck = 0;
+
+// ================= ЭФФЕКТЫ ФОНА =================
+int currentEffectIdx = 0;
+struct Flake { float x, y, speed; }; Flake flakes[35];
+int matrixDrops[PANEL_RES_X];
+struct Star { float x, y, z, speed; }; Star stars[60];
+struct Spark { float x, y, vx, vy; int age, max_age; uint16_t color; }; Spark sparks[45];
+
+void initEffects() {
+  for (int i = 0; i < 35; i++) { flakes[i].x = random(128); flakes[i].y = random(64); flakes[i].speed = random(5, 25) / 10.0; }
+  for (int i = 0; i < PANEL_RES_X; i++) { matrixDrops[i] = random(-100, 0); }
+  for (int i = 0; i < 60; i++) { stars[i].x = random(-64, 64); stars[i].y = random(-32, 32); stars[i].z = random(1, 64); stars[i].speed = random(1, 3) / 10.0; }
+  for (int i = 0; i < 45; i++) { sparks[i].age = 999; }
+}
+
+void updateSnow() {
+  for (int i = 0; i < 35; i++) {
+    dma_display->drawPixel(flakes[i].x, flakes[i].y, dma_display->color565(200, 200, 200));
+    flakes[i].y += flakes[i].speed;
+    if (flakes[i].y > 64) { flakes[i].y = 0; flakes[i].x = random(128); }
+  }
+}
+
+void updateMatrix() {
+  for (int i = 0; i < PANEL_RES_X; i += 2) {
+    if (matrixDrops[i] >= 0 && matrixDrops[i] < PANEL_RES_Y) {
+      dma_display->drawPixel(i, matrixDrops[i], dma_display->color565(0, 255, 0));
+      if (matrixDrops[i] > 0) dma_display->drawPixel(i, matrixDrops[i] - 1, dma_display->color565(0, 150, 0));
+      if (matrixDrops[i] > 1) dma_display->drawPixel(i, matrixDrops[i] - 2, dma_display->color565(0, 50, 0));
+    }
+    matrixDrops[i]++;
+    if (matrixDrops[i] > PANEL_RES_Y + random(0, 50)) matrixDrops[i] = random(-20, 0);
+  }
+}
+
+void updateStars() {
+  for (int i = 0; i < 60; i++) {
+    stars[i].z -= stars[i].speed;
+    if (stars[i].z <= 0) { stars[i].x = random(-64, 64); stars[i].y = random(-32, 32); stars[i].z = 64; }
+    int sx = (stars[i].x / stars[i].z * 30) + 64;
+    int sy = (stars[i].y / stars[i].z * 30) + 32;
+    if (sx >= 0 && sx < 128 && sy >= 0 && sy < 64) {
+      int bri = 255 - (stars[i].z * 4);
+      if (bri < 0) bri = 0;
+      dma_display->drawPixel(sx, sy, dma_display->color565(bri, bri, bri));
+    }
+  }
+}
+
+void initFireworks() {
+  int cx = random(30, 98); int cy = random(10, 30);
+  uint16_t col = dma_display->color565(random(100, 255), random(100, 255), random(100, 255));
+  for (int i = 0; i < 45; i++) {
+    sparks[i].x = cx; sparks[i].y = cy;
+    float angle = random(0, 360) * 3.1415 / 180.0; float speed = random(10, 35) / 10.0;
+    sparks[i].vx = cos(angle) * speed; sparks[i].vy = sin(angle) * speed; sparks[i].age = 0;
+    sparks[i].max_age = random(15, 35); sparks[i].color = col;
+  }
+}
+
+void updateFireworks() {
+  bool active = false;
+  for (int i = 0; i < 45; i++) {
+    if (sparks[i].age < sparks[i].max_age) {
+      active = true;
+      dma_display->drawPixel(sparks[i].x, sparks[i].y, sparks[i].color);
+      sparks[i].x += sparks[i].vx; sparks[i].y += sparks[i].vy; sparks[i].vy += 0.05; sparks[i].age++;
+    }
+  }
+  if (!active && random(0, 100) < 3) initFireworks();
+}
+
+// ================= ЧТЕНИЕ SD КАРТЫ (BMP ИКОНКИ) =================
+uint16_t read16(File &f) { uint16_t result; ((uint8_t *)&result)[0] = f.read(); ((uint8_t *)&result)[1] = f.read(); return result; }
+uint32_t read32(File &f) { uint32_t result; ((uint8_t *)&result)[0] = f.read(); ((uint8_t *)&result)[1] = f.read(); ((uint8_t *)&result)[2] = f.read(); ((uint8_t *)&result)[3] = f.read(); return result; }
+
+void drawBmp(const char *filename, int16_t x, int16_t y) {
+  if ((x >= 128) || (y >= 64) || (x + 24 < 0)) return;
+  File bmpFile = SD.open(filename);
+  if (!bmpFile) return;
+
+  uint32_t seekOffset, w, h; uint16_t depth;
+  if (read16(bmpFile) == 0x4D42) {
+    read32(bmpFile); read32(bmpFile); seekOffset = read32(bmpFile); read32(bmpFile);
+    w = read32(bmpFile); h = read32(bmpFile);
+    if (read16(bmpFile) == 1) {
+      depth = read16(bmpFile);
+      if (depth == 24 && read32(bmpFile) == 0) {
+        int rowSize = (w * 3 + 3) & ~3;
+        uint8_t lineBuffer[rowSize];
+        for (int row = 0; row < h; row++) {
+          int drawY = y + h - 1 - row;
+          if (drawY < 0 || drawY >= 64) continue;
+          bmpFile.seek(seekOffset + row * rowSize);
+          bmpFile.read(lineBuffer, rowSize);
+          for (int col = 0; col < w; col++) {
+            int drawX = x + col;
+            if (drawX < 0 || drawX >= 128) continue;
+            uint8_t b = lineBuffer[col * 3]; uint8_t g = lineBuffer[col * 3 + 1]; uint8_t r = lineBuffer[col * 3 + 2];
+            if (r > 5 || g > 5 || b > 5) dma_display->drawPixel(drawX, drawY, dma_display->color565(r, g, b));
+          }
+        }
+      }
+    }
+  }
+  bmpFile.close();
+}
+
+// ================= ФУНКЦИИ ТЕКСТА =================
+String parseTelegramEmojis(String text) {
+  text.replace("❤️", "[heart]"); text.replace("😀", "[smile]"); text.replace("😊", "[smile]"); text.replace("👍", "[like]");
+  text.replace("🔥", "[fire]"); text.replace("😂", "[laugh]"); text.replace("😎", "[cool]"); text.replace("😢", "[cry]"); text.replace("😡", "[angry]");
+  return text;
+}
+
+int getMixedTextWidth(String text) {
+  int w = 0, i = 0;
+  while (i < text.length()) {
+    int tagStart = text.indexOf('[', i);
+    if (tagStart == -1) { w += u8g2_fonts.getUTF8Width(text.substring(i).c_str()); break; }
+    w += u8g2_fonts.getUTF8Width(text.substring(i, tagStart).c_str());
+    int tagEnd = text.indexOf(']', tagStart);
+    if (tagEnd != -1) { w += 26; i = tagEnd + 1; } 
+    else { w += u8g2_fonts.getUTF8Width("["); i = tagStart + 1; }
+  }
+  return w;
+}
+
+void drawMixedText(String text, int x, int y) {
+  int currX = x, i = 0;
+  while (i < text.length()) {
+    int tagStart = text.indexOf('[', i);
+    if (tagStart == -1) { u8g2_fonts.setCursor(currX, y); u8g2_fonts.print(text.substring(i)); break; }
+    String sub = text.substring(i, tagStart);
+    u8g2_fonts.setCursor(currX, y); u8g2_fonts.print(sub);
+    currX += u8g2_fonts.getUTF8Width(sub.c_str());
+
+    int tagEnd = text.indexOf(']', tagStart);
+    if (tagEnd != -1) {
+      String tag = text.substring(tagStart + 1, tagEnd);
+      String filename = "/" + tag + ".bmp";
+      drawBmp(filename.c_str(), currX, y - 24);
+      currX += 26; i = tagEnd + 1;
+    } else {
+      u8g2_fonts.setCursor(currX, y); u8g2_fonts.print("[");
+      currX += u8g2_fonts.getUTF8Width("["); i = tagStart + 1;
+    }
+  }
+}
+
+uint16_t hexToRGB565(String hex) {
+  if (hex.startsWith("#")) hex.remove(0, 1);
+  long rgb = strtol(hex.c_str(), NULL, 16);
+  return dma_display->color565((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+}
+
+void buildScreenSequence() {
+  numActiveScreens = 0;
+  if (showClockFlag) activeScreens[numActiveScreens++] = 0;
+  if (showWeatherFlag) activeScreens[numActiveScreens++] = 1;
+  if (showExtWeatherFlag) activeScreens[numActiveScreens++] = 2;
+  if (showGraphFlag) activeScreens[numActiveScreens++] = 5;
+  if (showCurrencyFlag) activeScreens[numActiveScreens++] = 3;
+  if (showCountdownFlag) activeScreens[numActiveScreens++] = 4;
+  if (numActiveScreens == 0) activeScreens[numActiveScreens++] = 0;
+  if (currentScreenIdx >= numActiveScreens) currentScreenIdx = 0;
+}
+
+void updateTextWidth() {
+  u8g2_fonts.setFont(isLargeText ? u8g2_font_inr27_t_cyrillic : u8g2_font_cu12_t_cyrillic);
+  textWidth = getMixedTextWidth(currentText);
+}
+
+void calculateCountdown() {
+  struct tm targetInfo = {0}; 
+  int yr, mo, dy;
+  if (sscanf(countdownTargetDate.c_str(), "%d-%d-%d", &yr, &mo, &dy) == 3) {
+    targetInfo.tm_year = yr - 1900; targetInfo.tm_mon = mo - 1; targetInfo.tm_mday = dy;
+    targetInfo.tm_hour = 0; targetInfo.tm_min = 0; targetInfo.tm_sec = 0; targetInfo.tm_isdst = -1;
+    daysRemaining = (mktime(&targetInfo) - time(NULL)) / 86400;
+  }
+}
+
+// ================= ФУНКЦИИ СЕТИ И ДАННЫХ =================
+void checkTelegram() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClientSecure client; client.setInsecure(); HTTPClient http; http.setTimeout(4000);
+  String url = "https://api.telegram.org/bot" + tgToken + "/getUpdates?limit=1&offset=" + String(lastTgUpdateId + 1);
+  http.begin(client, url);
+  if (http.GET() == 200) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, http.getString())) {
+      if (doc["ok"] == true && doc["result"].size() > 0) {
+        lastTgUpdateId = doc["result"][0]["update_id"];
+        String msgText = parseTelegramEmojis(doc["result"][0]["message"]["text"].as<String>());
+        if (msgText.length() > 0) {
+          currentText = msgText;
+          newTelegramMessage = true; 
+        }
+      }
+    }
+  }
+  http.end();
+}
+
+void fetchNews() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClientSecure client; client.setInsecure(); HTTPClient http; http.setTimeout(6000);
+  http.begin(client, "https://lenta.ru/rss/news");
+  if (http.GET() == 200) {
+    String payload = http.getString();
+    String parsedNews = " 🌍 ГЛАВНЫЕ НОВОСТИ: ";
+    int startIndex = payload.indexOf("<title>");
+    if (startIndex != -1) startIndex += 7;
+    int count = 0;
+    while (count < 4) {
+      startIndex = payload.indexOf("<title>", startIndex);
+      if (startIndex == -1) break;
+      startIndex += 7;
+      int endIndex = payload.indexOf("</title>", startIndex);
+      if (endIndex != -1) {
+        String title = payload.substring(startIndex, endIndex);
+        title.replace("<![CDATA[", ""); title.replace("]]>", ""); parsedNews += " • " + title; count++;
+      }
+    }
+    if (count > 0) newsText = parsedNews + "   *** ";
+  }
+  http.end();
+}
+
+void fetchAllData() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http; http.setTimeout(4000);
+  http.begin("http://api.openweathermap.org/data/2.5/weather?lat=44.2104&lon=43.1353&appid=de96804e73a17f33576c4e8dc1551bf2&units=metric&lang=ru");
+  if (http.GET() == 200) {
+    JsonDocument doc; deserializeJson(doc, http.getString());
+    int t = (int)doc["main"]["temp"];
+    currentTemp = (t > 0 ? "+" : "") + String(t);
+    currentWeatherDesc = doc["weather"][0]["description"].as<String>();
+    weatherIconCode = doc["weather"][0]["icon"].as<String>();
+    currentHumidity = String((int)doc["main"]["humidity"]);
+    currentWind = String((float)doc["wind"]["speed"], 1);
+    int fl = (int)doc["main"]["feels_like"]; currentFeelsLike = (fl > 0 ? "+" : "") + String(fl);
+  }
+  http.end();
+
+  http.begin("http://api.openweathermap.org/data/2.5/forecast?lat=44.2104&lon=43.1353&appid=de96804e73a17f33576c4e8dc1551bf2&units=metric&cnt=6");
+  if (http.GET() == 200) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, http.getString())) {
+      for (int i = 0; i < 6; i++) { forecastTemps[i] = (int)doc["list"][i]["main"]["temp"]; }
+      forecastLoaded = true;
+    }
+  }
+  http.end();
+
+  http.begin("http://open.er-api.com/v6/latest/USD");
+  if (http.GET() == 200) {
+    JsonDocument doc; deserializeJson(doc, http.getString());
+    float rub = doc["rates"]["RUB"], eur = doc["rates"]["EUR"];
+    if (rub > 0 && eur > 0) { currentUsdRate = String(rub, 1); currentEurRate = String(rub / eur, 1); dataLoaded = true; }
+  }
+  http.end();
+  calculateCountdown(); if (showNewsFlag) fetchNews();
+}
+
+void networkTaskCode(void *parameter) {
+  for (;;) {
+    // === ИЗМЕНЕНИЕ: В фоновой задаче используем просто WiFi.begin() без жесткого логина и пароля ===
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.disconnect(); 
+      WiFi.begin(); // Берет пароль из сохраненной памяти WiFiManager
+      vTaskDelay(5000 / portTICK_PERIOD_MS); continue;
+    }
+    unsigned long ms = millis();
+    if (ms - lastDataUpdate >= (dataLoaded ? 900000 : 10000)) { fetchAllData(); lastDataUpdate = millis(); }
+    if (millis() - lastTgCheck >= 5000) { checkTelegram(); lastTgCheck = millis(); }
+
+    if (ms - lastGitHubCheck >= 3600000 || lastGitHubCheck == 0) {
+      if (githubRepo != "ВАШ_ЛОГИН/ВАШ_РЕПОЗИТОРИЙ" && WiFi.status() == WL_CONNECTED) {
+        WiFiClientSecure client; client.setInsecure(); HTTPClient http; http.setTimeout(4000);
+        http.begin(client, "https://raw.githubusercontent.com/" + githubRepo + "/main/version.txt");
+        if (http.GET() == 200) {
+          float newVer = http.getString().toFloat();
+          if (newVer > FIRMWARE_VERSION) triggerGitHubUpdate = true;
+        }
+        http.end();
+      }
+      lastGitHubCheck = ms;
+    }
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+  }
+}
+
+// ================= ИНТЕРФЕЙС WEB-СТРАНИЦЫ =================
+void handleRoot() {
+  String s;
+  s.reserve(4000);
+  s += "<!DOCTYPE html><html lang='ru'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  s += "<style>";
+  s += ":root{--bg:#121212;--card:#1e1e1e;--text:#eee;--primary:#0d6efd;--success:#198754;--danger:#dc3545;--dark:#2d2d2d;--gray:#555}";
+  s += "body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;margin:0;padding:15px}";
+  s += "*{box-sizing:border-box}";
+  s += "h2{text-align:center;margin-top:0;color:#fff;font-weight:600}";
+  s += ".card{background:var(--card);border-radius:12px;padding:18px;margin-bottom:18px;box-shadow:0 4px 10px rgba(0,0,0,0.4)}";
+  s += ".card h3{margin:0 0 15px 0;border-bottom:1px solid #333;padding-bottom:10px;font-size:18px;color:#fff}";
+  s += "input[type=text],input[type=number],input[type=date],select{width:100%;padding:12px;margin:5px 0 10px;background:var(--dark);border:1px solid #444;border-radius:8px;color:#fff;font-size:16px;outline:none;font-family:inherit}";
+  s += "input[type=color]{width:100%;height:45px;border:none;border-radius:8px;background:none;cursor:pointer}";
+  s += "button{width:100%;padding:14px;margin:5px 0;border:none;border-radius:8px;font-size:16px;font-weight:600;color:#fff;cursor:pointer;transition:0.2s}";
+  s += "button:active{transform:scale(0.98)}";
+  s += ".btn-p{background:var(--primary)}.btn-s{background:var(--success)}.btn-d{background:var(--danger)}.btn-w{background:#ef6c00}";
+  s += ".row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:10px}";
+  s += "input[type=range]{-webkit-appearance:none;width:100%;background:transparent;margin:15px 0}";
+  s += "input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;height:24px;width:24px;border-radius:50%;background:var(--primary);cursor:pointer;margin-top:-9px;box-shadow:0 0 5px rgba(0,0,0,0.5)}";
+  s += "input[type=range]::-webkit-slider-runnable-track{width:100%;height:6px;cursor:pointer;background:var(--gray);border-radius:3px}";
+  s += ".switch{position:relative;display:inline-block;width:50px;height:28px;flex-shrink:0}";
+  s += ".switch input{opacity:0;width:0;height:0}";
+  s += ".slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:var(--gray);transition:.3s;border-radius:28px}";
+  s += ".slider:before{position:absolute;content:'';height:22px;width:22px;left:3px;bottom:3px;background-color:#fff;transition:.3s;border-radius:50%;box-shadow:0 2px 4px rgba(0,0,0,0.3)}";
+  s += "input:checked+.slider{background-color:var(--primary)}";
+  s += "input:checked+.slider:before{transform:translateX(22px)}";
+  s += ".flex-gap{display:flex;gap:10px}";
+  s += "</style></head><body>";
+  s += "<h2>Панель управления</h2>";
+  s += "<form action='/update' method='POST'>";
+
+  auto drawToggle = [](String name, String label, bool checked, int timeVal, String timeName) {
+    String res = "<div class='row'><span>" + label + "</span> <div style='display:flex;align-items:center;gap:10px'>";
+    if (timeName != "") res += "<input type='number' name='" + timeName + "' value='" + String(timeVal) + "' style='width:70px;margin:0;padding:8px;text-align:center;'> с ";
+    res += "<label class='switch'><input type='checkbox' name='" + name + "' value='1' " + (checked ? "checked" : "") + "><span class='slider'></span></label></div></div>";
+    return res;
+  };
+
+  s += "<div class='card'><h3>🖥️ Экраны и Эффекты</h3>";
+  s += "<div class='row'><span>Эффект фона:</span> <select name='eff' style='width:auto;flex:1;margin-left:10px;margin-bottom:0;'>";
+  s += "<option value='0' " + String(currentEffectIdx == 0 ? "selected" : "") + ">Авто (Праздники)</option>";
+  s += "<option value='1' " + String(currentEffectIdx == 1 ? "selected" : "") + ">Нет эффектов</option>";
+  s += "<option value='2' " + String(currentEffectIdx == 2 ? "selected" : "") + ">Снегопад ❄️</option>";
+  s += "<option value='3' " + String(currentEffectIdx == 3 ? "selected" : "") + ">Матрица 🟢</option>";
+  s += "<option value='4' " + String(currentEffectIdx == 4 ? "selected" : "") + ">Звезды ✨</option>";
+  s += "<option value='5' " + String(currentEffectIdx == 5 ? "selected" : "") + ">Салют 🎆</option></select></div><hr style='border:none;border-top:1px solid #333;margin:15px 0'>";
+  
+  s += drawToggle("scl", "Экран: Часы", showClockFlag, clockShowSec, "tcl");
+  s += drawToggle("sw", "Экран: Погода 1", showWeatherFlag, weatherShowSec, "tw");
+  s += drawToggle("sew", "Экран: Погода 2", showExtWeatherFlag, extWeatherShowSec, "tew");
+  s += drawToggle("sgr", "Экран: График t°", showGraphFlag, graphShowSec, "tgr");
+  s += drawToggle("scu", "Экран: Валюта", showCurrencyFlag, currencyShowSec, "tcu");
+  s += drawToggle("sco", "Экран: Событие", showCountdownFlag, countdownShowSec, "tco");
+  s += "<hr style='border:none;border-top:1px solid #333;margin:15px 0'>";
+  s += drawToggle("snews", "🌍 Новости (раз в 2 мин)", showNewsFlag, 0, "");
+  
+  s += "<span>Скорость новостей:</span><input type='range' name='nsp' min='10' max='65' value='" + String(75 - newsScrollSpeed) + "'>";
+  s += "<div class='row'><span>Смена экранов:</span> <select name='at' style='width:auto;flex:1;margin-left:10px;margin-bottom:0;'>";
+  s += "<option value='0' " + String(animType == 0 ? "selected" : "") + ">Вверх</option>";
+  s += "<option value='1' " + String(animType == 1 ? "selected" : "") + ">Влево</option>";
+  s += "<option value='2' " + String(animType == 2 ? "selected" : "") + ">Вниз</option>";
+  s += "<option value='3' " + String(animType == 3 ? "selected" : "") + ">Вправо</option>";
+  s += "<option value='4' " + String(animType == 4 ? "selected" : "") + ">Диагональ 1</option>";
+  s += "<option value='5' " + String(animType == 5 ? "selected" : "") + ">Диагональ 2</option>";
+  s += "<option value='6' " + String(animType == 6 ? "selected" : "") + ">🎲 Случайная</option></select></div>";
+  s += "<button type='submit' name='a' value='sett' class='btn-p' style='margin-top:10px'>💾 Сохранить настройки</button></div>";
+
+  s += "<div class='card'><h3>🎉 Таймер события</h3>";
+  s += "<span>Дата события:</span><input type='date' name='cdate' value='" + countdownTargetDate + "'>";
+  s += "<span>Название (коротко):</span><input type='text' name='cname' value='" + countdownEventName + "'></div>";
+
+  s += "<div class='card'><h3>📜 Сообщение (Telegram)</h3>";
+  s += "<input type='text' name='msg' value='" + currentText + "'>";
+  s += "<div class='row'><span>Цвет текста:</span> <input type='color' name='tc' value='" + textColorHex + "' style='width:80px;height:35px;padding:0'></div>";
+  s += "<span>Скорость прокрутки:</span><input type='range' name='sp' min='10' max='65' value='" + String(75 - scrollSpeed) + "'>";
+  s += "<div class='row'><span>Размер шрифта:</span> <select name='ts' style='margin:0;width:auto;flex:1;margin-left:10px'><option value='1' " + String(isLargeText ? "selected" : "") + ">Крупный</option><option value='0' " + String(!isLargeText ? "selected" : "") + ">Обычный</option></select></div>";
+  s += "<div class='flex-gap' style='margin-top:10px'><button type='submit' name='a' value='once' class='btn-w'>Прокрутить 1 раз</button><button type='submit' name='a' value='loop' class='btn-s'>Поставить в цикл</button></div>";
+  s += "<button type='submit' name='a' value='stop' class='btn-d'>⏹ Выключить текст</button></div>";
+
+  s += "<div class='card'><h3>⚙️ Общие настройки</h3>";
+  s += "<div class='row'><span>Цвет часов:</span> <input type='color' name='cc' value='" + clockColorHex + "' style='width:80px;height:35px;padding:0'></div>";
+  s += "<div class='row'><span>Цвет даты:</span> <input type='color' name='dc' value='" + dateColorHex + "' style='width:80px;height:35px;padding:0'></div>";
+  s += "<span>Яркость матрицы:</span><input type='range' name='br' min='1' max='255' value='" + String(currentBrightness) + "'>";
+  s += drawToggle("nm", "Ночной режим (23:00-07:00)", nightModeAuto, 0, "");
+  s += "</div>";
+
+  s += "<div class='card'><h3>⏲️ Быстрый таймер</h3>";
+  s += "<input type='number' name='tm' value='" + String(timerMinutesInput) + "' placeholder='Минуты'>";
+  s += timerActive || timerAlert ? "<button type='submit' name='a' value='t_stop' class='btn-d'>ОСТАНОВИТЬ</button>" : "<button type='submit' name='a' value='t_start' class='btn-s'>ЗАПУСТИТЬ</button>";
+  s += "</div>";
+
+  s += "<button type='submit' name='a' value='reboot' class='btn-d' style='margin-bottom:30px;opacity:0.8'>🔄 ПЕРЕЗАГРУЗИТЬ ESP32</button>";
+  s += "</form></body></html>";
+
+  server.send(200, "text/html", s);
+}
+
+void handleUpdate() {
+  String a = server.arg("a");
+  if (a == "reboot") ESP.restart();
+  if (a == "once") { currentScrollMode = SCROLL_ONCE; scrollX = 128; isNewsScrolling = false; } 
+  else if (a == "loop") { currentScrollMode = SCROLL_LOOP; scrollX = 128; isNewsScrolling = false; } 
+  else if (a == "stop") currentScrollMode = SCROLL_NONE;
+  else if (a == "t_start") { timerMinutesInput = server.arg("tm").toInt(); timerEndTime = millis() + (timerMinutesInput * 60000); timerActive = true; timerAlert = false; } 
+  else if (a == "t_stop") { timerActive = false; timerAlert = false; }
+  
+  if (server.hasArg("msg")) currentText = server.arg("msg");
+  if (server.hasArg("ts")) isLargeText = server.arg("ts") == "1";
+  if (server.hasArg("sp")) scrollSpeed = 75 - server.arg("sp").toInt();
+  if (server.hasArg("nsp")) newsScrollSpeed = 75 - server.arg("nsp").toInt();
+  if (server.hasArg("at")) animType = server.arg("at").toInt();
+  if (server.hasArg("tc")) { textColorHex = server.arg("tc"); textColor = hexToRGB565(textColorHex); }
+  if (server.hasArg("cc")) { clockColorHex = server.arg("cc"); clockColor = hexToRGB565(clockColorHex); }
+  if (server.hasArg("dc")) { dateColorHex = server.arg("dc"); dateColor = hexToRGB565(dateColorHex); }
+  if (server.hasArg("br")) currentBrightness = server.arg("br").toInt();
+  if (server.hasArg("cdate")) countdownTargetDate = server.arg("cdate");
+  if (server.hasArg("cname")) countdownEventName = server.arg("cname");
+  if (server.hasArg("eff")) currentEffectIdx = server.arg("eff").toInt();
+  showClockFlag = server.hasArg("scl"); showWeatherFlag = server.hasArg("sw"); showCurrencyFlag = server.hasArg("scu");
+  showExtWeatherFlag = server.hasArg("sew"); showCountdownFlag = server.hasArg("sco"); showNewsFlag = server.hasArg("snews"); showGraphFlag = server.hasArg("sgr");
+  clockShowSec = server.arg("tcl").toInt(); weatherShowSec = server.arg("tw").toInt(); currencyShowSec = server.arg("tcu").toInt();
+  extWeatherShowSec = server.arg("tew").toInt(); countdownShowSec = server.arg("tco").toInt(); graphShowSec = server.arg("tgr").toInt();
+  nightModeAuto = server.hasArg("nm");
+  buildScreenSequence(); calculateCountdown(); updateTextWidth();
+  server.sendHeader("Location", "/"); server.send(303);
+}
+
+// ================= ОТРИСОВКА ЭКРАНОВ =================
+void drawWiFiIcon(int x, int y) {
+  uint16_t color = (WiFi.RSSI() < -75) ? dma_display->color565(255, 0, 0) : dma_display->color565(0, 255, 0);
+  int step = (millis() / 300) % 4; 
+  dma_display->drawPixel(x + 2, y + 4, color); 
+  if (step > 0) dma_display->drawLine(x + 1, y + 3, x + 3, y + 3, color); 
+  if (step > 1) dma_display->drawLine(x, y + 2, x + 4, y + 2, color); 
+}
+
+void drawAnimatedWeather(int x, int y, String code) {
+  unsigned long t = millis();
+  uint16_t cYellow = dma_display->color565(255, 200, 0); uint16_t cWhite = dma_display->color565(255, 255, 255);
+  uint16_t cBlue = dma_display->color565(0, 150, 255); uint16_t cGray = dma_display->color565(120, 120, 120);
+  uint16_t cBlack = dma_display->color565(0, 0, 0);
+
+  if (code == "01d") {
+    dma_display->fillCircle(x + 15, y + 15, 7, cYellow);
+    for (int i = 0; i < 8; i++) {
+      float angle = (t / 300.0) + (i * 3.1415 / 4.0);
+      dma_display->drawLine(x + 15 + cos(angle) * 9, y + 15 + sin(angle) * 9, x + 15 + cos(angle) * 13, y + 15 + sin(angle) * 13, cYellow);
+    }
+  } else if (code == "01n") {
+    dma_display->fillCircle(x + 15, y + 15, 8, cYellow); dma_display->fillCircle(x + 12, y + 13, 7, cBlack); 
+  } else if (code.indexOf("02") != -1 || code.indexOf("03") != -1 || code.indexOf("04") != -1 || code.indexOf("50") != -1) {
+    int dy = sin(t / 300.0) * 2;
+    if (code == "02d") dma_display->fillCircle(x + 22, y + 10 + dy, 6, cYellow);
+    if (code == "02n") { dma_display->fillCircle(x + 22, y + 10 + dy, 6, cYellow); dma_display->fillCircle(x + 20, y + 8 + dy, 5, cBlack); }
+    dma_display->fillCircle(x + 12, y + 18 + dy, 6, cWhite); dma_display->fillCircle(x + 18, y + 14 + dy, 8, cWhite);
+    dma_display->fillCircle(x + 24, y + 18 + dy, 6, cWhite); dma_display->fillRect(x + 12, y + 14 + dy, 13, 11, cWhite);
+  } else if (code.indexOf("09") != -1 || code.indexOf("10") != -1) {
+    dma_display->fillCircle(x + 12, y + 14, 6, cGray); dma_display->fillCircle(x + 18, y + 10, 8, cGray);
+    dma_display->fillCircle(x + 24, y + 14, 6, cGray); dma_display->fillRect(x + 12, y + 10, 13, 11, cGray);
+    for (int i = 0; i < 3; i++) {
+      int dropY = ((t / 30) + i * 8) % 12; int dropX = x + 10 + i * 6;
+      dma_display->drawLine(dropX, y + 20 + dropY, dropX - 2, y + 23 + dropY, cBlue);
+    }
+  } else if (code.indexOf("13") != -1) {
+    dma_display->fillCircle(x + 12, y + 14, 6, cWhite); dma_display->fillCircle(x + 18, y + 10, 8, cWhite);
+    dma_display->fillCircle(x + 24, y + 14, 6, cWhite); dma_display->fillRect(x + 12, y + 10, 13, 11, cWhite);
+    for (int i = 0; i < 3; i++) {
+      int snowY = ((t / 50) + i * 8) % 12; int snowX = x + 10 + i * 6 + sin((t / 200.0) + i) * 2;
+      dma_display->drawPixel(snowX, y + 20 + snowY, cWhite); dma_display->drawPixel(snowX + 1, y + 20 + snowY, cWhite); 
+    }
+  } else if (code.indexOf("11") != -1) {
+    dma_display->fillCircle(x + 12, y + 14, 6, cGray); dma_display->fillCircle(x + 18, y + 10, 8, cGray);
+    dma_display->fillCircle(x + 24, y + 14, 6, cGray); dma_display->fillRect(x + 12, y + 10, 13, 11, cGray);
+    if ((t % 1000) < 150) { 
+      dma_display->drawLine(x + 18, y + 18, x + 15, y + 24, cYellow); dma_display->drawLine(x + 15, y + 24, x + 19, y + 24, cYellow);
+      dma_display->drawLine(x + 19, y + 24, x + 16, y + 30, cYellow);
+    }
+  }
+}
+
+void drawScreen(int type, int ox, int oy, struct tm *i, bool ok) {
+  if (type == 0) {
+    if (!ok) return;
+    char t[15], d[15];
+    strftime(t, 15, "%H:%M:%S", i);
+    strftime(d, 15, "%d.%m.%Y", i);
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+    u8g2_fonts.setForegroundColor(clockColor);
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(t)) / 2, oy + 32);
+    u8g2_fonts.print(t);
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(dateColor);
+    String day = daysOfWeek[i->tm_wday];
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(day.c_str())) / 2, oy + 47);
+    u8g2_fonts.print(day);
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(d)) / 2, oy + 61);
+    u8g2_fonts.print(d);
+    drawWiFiIcon(ox + 120, oy + 2);
+  } else if (type == 1) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic); u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 0));
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(currentWeatherDesc.c_str())) / 2, oy + 15);
+    u8g2_fonts.print(currentWeatherDesc);
+    drawAnimatedWeather(ox + 10, oy + 25, weatherIconCode);
+    u8g2_fonts.setFont(u8g2_font_logisoso32_tn); u8g2_fonts.setForegroundColor(dma_display->color565(255, 100, 0));
+    u8g2_fonts.setCursor(ox + 50, oy + 55); u8g2_fonts.print(currentTemp + "C");
+  } else if (type == 2) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic); u8g2_fonts.setForegroundColor(dma_display->color565(0, 255, 255));
+    String title = "Прогноз погоды";
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(title.c_str())) / 2, oy + 14); u8g2_fonts.print(title);
+    dma_display->drawLine(ox + 10, oy + 18, ox + 118, oy + 18, dma_display->color565(0, 150, 150));
+    drawAnimatedWeather(ox - 5, oy + 30, weatherIconCode);
+    int textX = ox + 40;
+    u8g2_fonts.setCursor(textX, oy + 34); u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 255)); u8g2_fonts.print("Ощущ: ");
+    u8g2_fonts.setForegroundColor(dma_display->color565(50, 150, 255)); u8g2_fonts.print(currentFeelsLike + "C");
+    u8g2_fonts.setCursor(textX, oy + 48); u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 255)); u8g2_fonts.print("Влажн: ");
+    u8g2_fonts.setForegroundColor(dma_display->color565(50, 150, 255)); u8g2_fonts.print(currentHumidity + "%");
+    u8g2_fonts.setCursor(textX, oy + 62); u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 255)); u8g2_fonts.print("Ветер: ");
+    u8g2_fonts.setForegroundColor(dma_display->color565(50, 150, 255)); u8g2_fonts.print(currentWind + " м/с");
+  } else if (type == 3) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic); u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 255));
+    u8g2_fonts.setCursor(ox + 30, oy + 15); u8g2_fonts.print("КУРСЫ:");
+    u8g2_fonts.setCursor(ox + 5, oy + 38); u8g2_fonts.print("USD: " + currentUsdRate + "р");
+    u8g2_fonts.setCursor(ox + 5, oy + 60); u8g2_fonts.print("EUR: " + currentEurRate + "р");
+    int cy = oy + 15 + sin(millis() / 150.0) * 4;
+    dma_display->fillCircle(ox + 105, cy, 7, dma_display->color565(255, 215, 0)); 
+    dma_display->fillCircle(ox + 105, cy, 5, dma_display->color565(255, 255, 0));
+    dma_display->drawLine(ox + 105, cy - 3, ox + 105, cy + 3, dma_display->color565(200, 100, 0));
+  } else if (type == 4) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic); u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 0));
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(countdownEventName.c_str())) / 2, oy + 15); u8g2_fonts.print(countdownEventName);
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr); u8g2_fonts.setForegroundColor(dma_display->color565(255, 0, 0));
+    String ds = String(daysRemaining);
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(ds.c_str())) / 2, oy + 46); u8g2_fonts.print(ds);
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic); u8g2_fonts.setForegroundColor(dma_display->color565(200, 200, 200));
+    u8g2_fonts.setCursor(ox + 50, oy + 62); u8g2_fonts.print("дней");
+    int hx = ox + 105, hy = oy + 32;
+    uint16_t sandColor = dma_display->color565(255, 200, 0);
+    uint16_t glassColor = dma_display->color565(100, 150, 255);
+    dma_display->drawLine(hx - 8, hy - 10, hx + 8, hy - 10, glassColor);
+    dma_display->drawLine(hx - 8, hy + 10, hx + 8, hy + 10, glassColor);
+    dma_display->drawLine(hx - 8, hy - 10, hx, hy, glassColor); 
+    dma_display->drawLine(hx + 8, hy - 10, hx, hy, glassColor);
+    dma_display->drawLine(hx - 8, hy + 10, hx, hy, glassColor); 
+    dma_display->drawLine(hx + 8, hy + 10, hx, hy, glassColor);
+    int phase = (millis() / 250) % 9;
+    int topW = 8 - phase;
+    if (topW > 0) {
+      int topH = (topW * 10) / 8;
+      dma_display->fillTriangle(hx - topW, hy - topH, hx + topW, hy - topH, hx, hy, sandColor);
+    }
+    int fallY = (millis() / 40) % 10;
+    dma_display->drawPixel(hx, hy + fallY, sandColor);
+    int botW = phase;
+    if (botW > 0) {
+      int botH = (botW * 10) / 8;
+      dma_display->fillTriangle(hx - botW, hy + 10, hx + botW, hy + 10, hx, hy + 10 - botH, sandColor);
+    }
+  } else if (type == 5) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic); u8g2_fonts.setForegroundColor(dma_display->color565(0, 255, 255));
+    String title = "t° НА 15 часов";
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(title.c_str())) / 2, oy + 12); u8g2_fonts.print(title);
+    if (!forecastLoaded) return;
+    int minT = forecastTemps[0], maxT = forecastTemps[0];
+    for (int k = 0; k < 6; k++) { if (forecastTemps[k] < minT) minT = forecastTemps[k]; if (forecastTemps[k] > maxT) maxT = forecastTemps[k]; }
+    if (minT == maxT) { minT--; maxT++; }
+
+    dma_display->drawLine(ox + 5, oy + 60, ox + 123, oy + 60, dma_display->color565(60, 60, 60));
+    int max_k = (millis() - lastSwitchTime) / 250; 
+    if (isAnimating) max_k = 5; 
+    if (max_k > 5) max_k = 5;
+
+    for (int k = 0; k < 5; k++) {
+      int x1 = ox + 14 + (k * 20); int y1 = oy + 54 - ((forecastTemps[k] - minT) * 25 / (maxT - minT));
+      int x2 = ox + 14 + ((k + 1) * 20); int y2 = oy + 54 - ((forecastTemps[k + 1] - minT) * 25 / (maxT - minT));
+      if (k < max_k) {
+        uint16_t lineColor = dma_display->color565(255, 120, 0);
+        dma_display->drawLine(x1, y1, x2, y2, lineColor);
+        dma_display->drawLine(x1, y1 + 1, x2, y2 + 1, lineColor);
+      }
+      if (k <= max_k) {
+        dma_display->fillCircle(x1, y1, 2, dma_display->color565(255, 255, 0));
+        u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 255));
+        String tStr = String(forecastTemps[k]);
+        u8g2_fonts.setCursor(x1 - (u8g2_fonts.getUTF8Width(tStr.c_str()) / 2), y1 - 6); u8g2_fonts.print(tStr);
+      }
+      if (k == 4 && max_k == 5) {
+        dma_display->fillCircle(x2, y2, 2, dma_display->color565(255, 255, 0));
+        String tStrLast = String(forecastTemps[5]);
+        u8g2_fonts.setCursor(x2 - (u8g2_fonts.getUTF8Width(tStrLast.c_str()) / 2), y2 - 6); u8g2_fonts.print(tStrLast);
+      }
+    }
+  }
+}
+
+void drawFrame() {
+  if (timerAlert && (millis() / 500 % 2)) {
+    dma_display->fillScreen(dma_display->color565(255, 0, 0)); dma_display->flipDMABuffer(); return;
+  }
+  dma_display->clearScreen();
+  
+  if (showEnvelopeAnim) {
+    int envColor = dma_display->color565(200, 150, 50); int paperColor = dma_display->color565(255, 255, 255);
+    int stage = (millis() - envelopeAnimStart) / 400; int ex = 44, ey = 22, ew = 40, eh = 24;
+    if (stage >= 2) {
+      int paperY = ey - (stage - 1) * 8; if (paperY < 4) paperY = 4;
+      dma_display->fillRect(ex + 2, paperY, ew - 4, ey + eh - paperY, paperColor);
+      dma_display->drawLine(ex + 8, paperY + 4, ex + ew - 8, paperY + 4, dma_display->color565(100,100,255));
+      dma_display->drawLine(ex + 6, paperY + 8, ex + ew - 6, paperY + 8, dma_display->color565(100,100,255));
+      dma_display->fillTriangle(ex+ew/2 - 4, paperY + 12, ex+ew/2 + 6, paperY + 10, ex+ew/2 - 2, paperY + 18, dma_display->color565(0,150,255));
+    }
+    dma_display->fillRect(ex, ey, ew, eh, envColor);
+    dma_display->drawLine(ex, ey, ex + ew/2, ey + eh/2, dma_display->color565(150, 100, 0));
+    dma_display->drawLine(ex + ew, ey, ex + ew/2, ey + eh/2, dma_display->color565(150, 100, 0));
+    if (stage == 0) {
+      dma_display->fillTriangle(ex, ey, ex + ew, ey, ex + ew/2, ey + eh/2 + 2, envColor);
+      dma_display->drawLine(ex, ey, ex + ew/2, ey + eh/2 + 2, dma_display->color565(100, 50, 0));
+      dma_display->drawLine(ex + ew, ey, ex + ew/2, ey + eh/2 + 2, dma_display->color565(100, 50, 0));
+    } else if (stage == 1) {
+      dma_display->drawLine(ex, ey, ex + ew/2, ey - eh/2, envColor); dma_display->drawLine(ex + ew, ey, ex + ew/2, ey - eh/2, envColor);
+    } else {
+      dma_display->fillTriangle(ex, ey, ex + ew, ey, ex + ew/2, ey - eh/2 - 2, envColor);
+    }
+    dma_display->flipDMABuffer(); return;
+  }
+
+  int activeEffect = currentEffectIdx;
+  if (activeEffect == 0 && globalTimeOk) {
+    int m = globalTimeInfo.tm_mon + 1; int d = globalTimeInfo.tm_mday;
+    if ((m == 12 && d >= 25) || (m == 1 && d <= 7)) activeEffect = 2;
+    else if ((m == 2 && d == 23) || (m == 3 && d == 8) || (m == 5 && d == 9)) activeEffect = 5;
+    else activeEffect = 1;
+  }
+  switch (activeEffect) { case 2: updateSnow(); break; case 3: updateMatrix(); break; case 4: updateStars(); break; case 5: updateFireworks(); break; }
+  
+  if (timerActive) {
+    long r = (timerEndTime - millis()) / 1000;
+    if (r <= 0) { timerActive = false; timerAlert = true; } 
+    else {
+      u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic); u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 255));
+      u8g2_fonts.setCursor(2, 12); u8g2_fonts.printf("%02d:%02d", (int)r / 60, (int)r % 60);
+    }
+  }
+  
+  if (currentScrollMode != SCROLL_NONE) {
+    if (isNewsScrolling && globalTimeOk) {
+      char t[10]; strftime(t, 10, "%H:%M:%S", &globalTimeInfo);
+      u8g2_fonts.setFont(u8g2_font_logisoso24_tr); u8g2_fonts.setForegroundColor(clockColor);
+      u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width(t)) / 2, 28); u8g2_fonts.print(t);
+    }
+    u8g2_fonts.setFont(isLargeText ? u8g2_font_inr27_t_cyrillic : u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(textColor);
+    drawMixedText(currentText, scrollX, isNewsScrolling ? 58 : (isLargeText ? 42 : 38));
+  } else {
+    if (isAnimating) {
+      float p = (float)(millis() - animStartTime) / animDuration;
+      if (p > 1.0) p = 1.0; 
+      
+      int cx1 = 0, cy1 = 0, cx2 = 0, cy2 = 0;
+      int maxW = 128, maxH = 64;
+      
+      switch (activeAnimType) {
+        case 0: cy1 = -(p * maxH); cy2 = maxH + cy1; break; // Вверх
+        case 1: cx1 = -(p * maxW); cx2 = maxW + cx1; break; // Влево
+        case 2: cy1 = (p * maxH); cy2 = -maxH + cy1; break; // Вниз
+        case 3: cx1 = (p * maxW); cx2 = -maxW + cx1; break; // Вправо
+        case 4: cx1 = -(p * maxW); cy1 = -(p * maxH); cx2 = maxW + cx1; cy2 = maxH + cy1; break; // Диагональ 1
+        case 5: cx1 = (p * maxW); cy1 = (p * maxH); cx2 = -maxW + cx1; cy2 = -maxH + cy1; break; // Диагональ 2
+      }
+      
+      drawScreen(activeScreens[currentScreenIdx], cx1, cy1, &globalTimeInfo, globalTimeOk);
+      drawScreen(activeScreens[nextScreenIdx], cx2, cy2, &globalTimeInfo, globalTimeOk);
+    } else {
+      drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+    }
+  }
+  dma_display->flipDMABuffer();
+}
+
+// === ФУНКЦИЯ ДЛЯ WIFIMANAGER (ЕСЛИ НЕТ ИНТЕРНЕТА) ===
+void configModeCallback(WiFiManager *myWiFiManager) {
+  dma_display->clearScreen();
+  u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+  
+  u8g2_fonts.setForegroundColor(dma_display->color565(255, 100, 0));
+  u8g2_fonts.setCursor(15, 20); 
+  u8g2_fonts.print("НЕТ ИНТЕРНЕТА!");
+  
+  u8g2_fonts.setForegroundColor(dma_display->color565(0, 255, 255));
+  u8g2_fonts.setCursor(5, 40); 
+  u8g2_fonts.print("Wi-Fi: Matrix_Setup");
+  
+  u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 0));
+  u8g2_fonts.setCursor(5, 55); 
+  u8g2_fonts.print("Пароль: 12345678");
+  
+  dma_display->flipDMABuffer();
+}
+
+void setup() {
+  delay(2000);
+  Serial.begin(115200);
+
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS, SPI, 4000000)) Serial.println("SD Card Mount Failed"); else Serial.println("SD Card Mount OK");
+  HUB75_I2S_CFG::i2s_pins p = { R1_PIN, G1_PIN, B1_PIN, R2_PIN, G2_PIN, B2_PIN, A_PIN, B_PIN, C_PIN, D_PIN, E_PIN, LAT_PIN, OE_PIN, CLK_PIN };
+  HUB75_I2S_CFG cfg(128, 64, 1, p);
+  cfg.double_buff = true; cfg.min_refresh_rate = 60; cfg.latch_blanking = 4; cfg.i2sspeed = HUB75_I2S_CFG::HZ_10M;
+  dma_display = new MatrixPanel_I2S_DMA(cfg);
+  dma_display->begin(); u8g2_fonts.begin(*dma_display); initEffects();
+
+  dma_display->clearScreen(); u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+  u8g2_fonts.setForegroundColor(dma_display->color565(255, 255, 0));
+  String s1 = "ЗАПУСК Wi-Fi...";
+  u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width(s1.c_str())) / 2, 35);
+  u8g2_fonts.print(s1); dma_display->flipDMABuffer();
+
+  // === НОВАЯ ЛОГИКА ПОДКЛЮЧЕНИЯ ЧЕРЕЗ WIFIMANAGER ===
+  WiFiManager wm;
+  wm.setAPCallback(configModeCallback);
+  // Ждем 3 минуты на подключение к порталу, если не вышло - перезагружаем плату (вдруг роутер просто завис)
+  wm.setConfigPortalTimeout(180); 
+  
+  if (!wm.autoConnect("Matrix_Setup", "12345678")) {
+    Serial.println("Не удалось подключиться, перезагрузка...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  // Если код дошел сюда, значит Wi-Fi успешно подключен!
+  configTime(3 * 3600, 0, "ru.pool.ntp.org", "pool.ntp.org");
+  ArduinoOTA.setHostname("Matrix");
+  ArduinoOTA.begin();
+
+  clockColor = hexToRGB565(clockColorHex); textColor = hexToRGB565(textColorHex);
+  dateColor = hexToRGB565(dateColorHex);
+  buildScreenSequence(); server.on("/", handleRoot); server.on("/update", HTTP_POST, handleUpdate); server.begin();
+
+  updateTextWidth(); lastSwitchTime = millis(); lastDataUpdate = millis() - 900000;
+  lastTgCheck = millis() + 5000;
+  xTaskCreatePinnedToCore(networkTaskCode, "NetworkTask", 16384, NULL, 1, NULL, 0);
+}
+
+void loop() {
+  if (triggerGitHubUpdate) {
+    triggerGitHubUpdate = false;
+    dma_display->clearScreen(); u8g2_fonts.setFont(u8g2_font_inr27_t_cyrillic);
+    u8g2_fonts.setForegroundColor(dma_display->color565(0, 255, 255));
+    u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width("ОБНОВЛЕНИЕ!")) / 2, 25); u8g2_fonts.print("ОБНОВЛЕНИЕ!");
+    u8g2_fonts.setForegroundColor(dma_display->color565(255, 0, 0));
+    u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width("НЕ ВЫКЛЮЧАТЬ")) / 2, 55); u8g2_fonts.print("НЕ ВЫКЛЮЧАТЬ");
+    dma_display->flipDMABuffer();
+    delay(2000);
+    WiFiClientSecure client; client.setInsecure();
+    httpUpdate.update(client, "https://raw.githubusercontent.com/" + githubRepo + "/main/firmware.bin");
+  }
+
+  ArduinoOTA.handle(); server.handleClient();
+  unsigned long ms = millis();
+  if (ms - lastTimeCheck > 200) {
+    bool timeWasOk = globalTimeOk;
+    globalTimeOk = getLocalTime(&globalTimeInfo, 0);
+    lastTimeCheck = ms;
+    if (!timeWasOk && globalTimeOk) calculateCountdown();
+  }
+
+  int tb = currentBrightness;
+  if (globalTimeOk && nightModeAuto && (globalTimeInfo.tm_hour >= 23 || globalTimeInfo.tm_hour < 7)) tb = 5;
+  if (tb != appliedBrightness) { dma_display->setBrightness8(tb); appliedBrightness = tb; }
+
+  if (newTelegramMessage) { showEnvelopeAnim = true; envelopeAnimStart = millis(); newTelegramMessage = false; }
+
+  if (showEnvelopeAnim) {
+    if (millis() - envelopeAnimStart > 2500) { showEnvelopeAnim = false; isNewsScrolling = false; updateTextWidth(); currentScrollMode = SCROLL_ONCE; scrollX = 128; }
+  } else if (showNewsFlag && currentScrollMode == SCROLL_NONE && (ms - lastNewsShowTime > 120000)) {
+    if (newsText.length() > 20) { isNewsScrolling = true; currentText = newsText; updateTextWidth(); currentScrollMode = SCROLL_ONCE; scrollX = 128; lastNewsShowTime = ms; }
+  }
+
+  if (!showEnvelopeAnim && currentScrollMode == SCROLL_NONE && numActiveScreens > 0) {
+    if (!isAnimating) {
+      int t_sec = 5;
+      if (activeScreens[currentScreenIdx] == 0) t_sec = clockShowSec;
+      else if (activeScreens[currentScreenIdx] == 1) t_sec = weatherShowSec;
+      else if (activeScreens[currentScreenIdx] == 2) t_sec = extWeatherShowSec;
+      else if (activeScreens[currentScreenIdx] == 3) t_sec = currencyShowSec;
+      else if (activeScreens[currentScreenIdx] == 4) t_sec = countdownShowSec;
+      else if (activeScreens[currentScreenIdx] == 5) t_sec = graphShowSec;
+      
+      if (ms - lastSwitchTime >= t_sec * 1000) {
+        nextScreenIdx = (currentScreenIdx + 1) % numActiveScreens;
+        if (currentScreenIdx != nextScreenIdx) { 
+          isAnimating = true; 
+          animStartTime = ms; 
+          activeAnimType = (animType == 6) ? random(0, 6) : animType;
+        } 
+        else { lastSwitchTime = ms; }
+      }
+    } else {
+      float p = (float)(ms - animStartTime) / animDuration;
+      if (p >= 1.0) { isAnimating = false; currentScreenIdx = nextScreenIdx; lastSwitchTime = ms; }
+    }
+  }
+
+  int activeScrollSpeed = isNewsScrolling ? newsScrollSpeed : scrollSpeed;
+  if (ms - lastScrollUpdate > activeScrollSpeed) {
+    lastScrollUpdate = ms;
+    if (!showEnvelopeAnim && currentScrollMode != SCROLL_NONE) {
+      scrollX--;
+      if (scrollX < -textWidth) { currentScrollMode = SCROLL_NONE; scrollX = 128; isNewsScrolling = false; currentText = "Жду сообщений!"; }
+    }
+    drawFrame();
+  }
+}
