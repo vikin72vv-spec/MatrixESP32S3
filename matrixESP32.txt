@@ -39,7 +39,7 @@ bool showEnvelopeAnim = false;
 unsigned long envelopeAnimStart = 0;
 
 // ================= ОБНОВЛЕНИЕ С GITHUB =================
-const float FIRMWARE_VERSION = 1.1;
+const float FIRMWARE_VERSION = 1.2;
 String githubRepo = "vikin72vv-spec/MatrixESP32S3";
 volatile bool triggerGitHubUpdate = false;
 unsigned long lastGitHubCheck = 0;
@@ -831,7 +831,7 @@ void handleRoot() {
   s += "<script>";
   s += "function save() { let d = new URLSearchParams(new FormData(document.getElementById('frm'))); d.append('ajax', '1'); fetch('/update', { method: 'POST', body: d }); }";
   s += "</script></head><body>";
-  s += "<h2>Управление матрицей</h2>";
+  s += "<h2>Управление матрицей <span style='font-size:12px; color:#888;'>v" + String(FIRMWARE_VERSION, 1) + "</span></h2>";
   s += "<form id='frm' action='/update' method='POST' onchange='save()'>";
 
   auto drawToggle = [](String name, String label, bool checked, int timeVal, String timeName) {
@@ -1610,13 +1610,18 @@ void loop() {
   if (triggerGitHubUpdate) {
     triggerGitHubUpdate = false;
     dma_display->clearScreen();
-    u8g2_fonts.setFont(u8g2_font_inr27_t_cyrillic);
+
+    // Включаем компактный шрифт, чтобы всё влезло
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+
     u8g2_fonts.setForegroundColor(dma_display->color565(0, 255, 255));
     u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width("ОБНОВЛЕНИЕ!")) / 2, 25);
     u8g2_fonts.print("ОБНОВЛЕНИЕ!");
+
     u8g2_fonts.setForegroundColor(dma_display->color565(255, 0, 0));
-    u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width("НЕ ВЫКЛЮЧАТЬ")) / 2, 55);
-    u8g2_fonts.print("НЕ ВЫКЛЮЧАТЬ");
+    u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width("НЕ ВЫКЛЮЧАТЬ питания")) / 2, 45);
+    u8g2_fonts.print("НЕ ВЫКЛЮЧАТЬ питания");
+
     dma_display->flipDMABuffer();
     delay(2000);
     WiFiClientSecure client;
