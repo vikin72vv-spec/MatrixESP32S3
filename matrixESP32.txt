@@ -1607,24 +1607,29 @@ void setup() {
 }
 
 void loop() {
-  if (triggerGitHubUpdate) {
-    triggerGitHubUpdate = false;
-    dma_display->clearScreen();
-
-    // Включаем компактный шрифт, чтобы всё влезло
+ if (triggerGitHubUpdate) {
+    triggerGitHubUpdate = false; 
+    dma_display->clearScreen(); 
+    
+    // Ставим мелкий, аккуратный шрифт
     u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
-
-    u8g2_fonts.setForegroundColor(dma_display->color565(0, 255, 255));
-    u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width("ОБНОВЛЕНИЕ!")) / 2, 25);
-    u8g2_fonts.print("ОБНОВЛЕНИЕ!");
-
-    u8g2_fonts.setForegroundColor(dma_display->color565(255, 0, 0));
-    u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width("НЕ ВЫКЛЮЧАТЬ питания")) / 2, 45);
-    u8g2_fonts.print("НЕ ВЫКЛЮЧАТЬ питания");
-
-    dma_display->flipDMABuffer();
-    delay(2000);
-    WiFiClientSecure client;
+    
+    // Пишем голубым цветом первую строку
+    u8g2_fonts.setForegroundColor(dma_display->color565(0, 255, 255)); 
+    String s1 = "ОБНОВЛЕНИЕ!";
+    u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width(s1.c_str())) / 2, 25); 
+    u8g2_fonts.print(s1);
+    
+    // Пишем красным цветом вторую строку
+    u8g2_fonts.setForegroundColor(dma_display->color565(255, 0, 0)); 
+    String s2 = "НЕ ВЫКЛЮЧАТЬ ПИТАНИЕ";
+    u8g2_fonts.setCursor((128 - u8g2_fonts.getUTF8Width(s2.c_str())) / 2, 45); 
+    u8g2_fonts.print(s2);
+    
+    dma_display->flipDMABuffer(); 
+    delay(2000); 
+    
+    WiFiClientSecure client; 
     client.setInsecure();
     httpUpdate.update(client, "https://raw.githubusercontent.com/" + githubRepo + "/main/firmware.bin");
   }
