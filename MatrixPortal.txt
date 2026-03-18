@@ -1,0 +1,2810 @@
+#include <SPI.h>
+#include <SD.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Update.h>
+#include <ArduinoOTA.h>
+#include <Adafruit_Protomatter.h>
+#include <U8g2_for_Adafruit_GFX.h>
+#include <time.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <HTTPUpdate.h>
+#include <WiFiManager.h>
+#include <Preferences.h>
+#include <DFRobotDFPlayerMini.h>
+
+// === БИБЛИОТЕКИ ДЛЯ АКСЕЛЕРОМЕТРА И ПЕСКА ===
+#include <Adafruit_Sensor.h>
+#include <Adafruit_LIS3DH.h>
+#include <Adafruit_PixelDust.h>
+
+// ================= НАСТРОЙКИ DFPLAYER =================
+#define DF_TX TX
+#define DF_RX RX
+HardwareSerial mySerial1(1);
+DFRobotDFPlayerMini myDFPlayer;
+int currentVolume = 18;
+bool nightSoundMute = true;
+
+// ================= НАСТРОЙКИ SD КАРТЫ =================
+#define SD_SCK A1
+#define SD_MOSI A2
+#define SD_MISO A3
+#define SD_CS A4
+
+// ================= ТЕЛЕГРАМ И GITHUB =================
+String tgToken = "8231470801:AAGfa479WYby3h2iFNDOQVisE1b75tCA1eY";
+long lastTgUpdateId = 0;
+unsigned long lastTgCheck = 0;
+volatile bool newTelegramMessage = false;
+bool showEnvelopeAnim = false;
+unsigned long envelopeAnimStart = 0;
+
+const float FIRMWARE_VERSION = 5.1;  // Добавлен ИЛС истребителя F-16
+String githubRepo = "vikin72vv-spec/MatrixESP32S3";
+volatile bool triggerGitHubUpdate = false;
+unsigned long lastGitHubCheck = 0;
+
+bool eyeSurpriseMode = false;
+unsigned long eyeSurpriseStart = 0;
+bool pendingTelegramAfterSurprise = false;
+
+// === ТЕРМИНАЛ HUD ===
+#define TERM_LINES 12
+String termLog[TERM_LINES] = {
+  "SYS INIT...", "MEM: OK", "LINK: EST", "CPU: OPTIMAL",
+  "VCC: 3.3V", "AWAITING...", "STANDBY...", "SCAN: ON",
+  "SYS BOOT...", "KERN OK", "NET OK", "READY"
+};
+float termScrollY = 0.0;
+unsigned long lastTermScrollTime = 0;
+int termStep = 0;
+
+// ================= ПИНЫ МАТРИЦЫ =================
+uint8_t rgbPins[] = { 42, 41, 40, 38, 39, 37 };
+uint8_t addrPins[] = { 45, 36, 48, 35, 21 };
+uint8_t clockPin = 2;
+uint8_t latchPin = 47;
+uint8_t oePin = 14;
+
+#define PANEL_RES_X 256
+#define PANEL_RES_Y 64
+
+Adafruit_Protomatter matrix(
+  PANEL_RES_X, 3, 1, rgbPins, 5, addrPins, clockPin, latchPin, oePin, true);
+
+U8G2_FOR_ADAFRUIT_GFX u8g2_fonts;
+WebServer server(80);
+Preferences preferences;
+
+Adafruit_LIS3DH lis = Adafruit_LIS3DH();
+bool accelFound = false;
+Adafruit_PixelDust sandSim(256, 64, 2000, 1, 128, true);
+
+// ================= ПЕРЕМЕННЫЕ ПОГОДЫ И ДАННЫХ =================
+String weatherLat = "44.2104", weatherLon = "43.1353";
+String currentText = "Жду сообщений!";
+String currentTemp = "--", currentWeatherDesc = "Загрузка...", weatherIconCode = "01d";
+String currentCity = "Город...";
+String currentWind = "--", currentHumidity = "--", currentFeelsLike = "--";
+String currentUsdRate = "--.--", currentEurRate = "--.--";
+String sunriseTime = "--:--", sunsetTime = "--:--";
+int forecastTemps[6] = { 0 };
+int forecastPress[6] = { 0 };
+bool forecastLoaded = false;
+
+String birthdayList = "";
+String tomorrowBirthdaysNames = "";
+bool hasBirthdayTomorrow = false;
+String todayBirthdaysNames = "";
+bool hasBirthdayToday = false;
+unsigned long lastBdayScrollTime = 0;
+int bdayNameScrollX = 0;
+
+bool diagSD = false, diagMP3 = false, diagWiFi = false;
+volatile bool apModeScroll = false;
+
+// === ПЕРЕМЕННЫЕ НАСТРОЕК ===
+bool showNewsFlag = false, showJokeFlag = true;
+int newsIntervalMins = 2, jokeIntervalMins = 5;
+volatile bool needNewJoke = true;
+String newsText = "Загрузка новостей...";
+String jokeText = "";
+unsigned long lastNewsShowTime = 0, lastJokeShowTime = 0;
+int newsScrollSpeed = 25, bdayScrollSpeed = 25;
+
+uint16_t clockColor, textColor, dateColor;
+String clockColorHex = "#00FFFF", textColorHex = "#00FF00", dateColorHex = "#969696";
+int currentBrightness = 80, appliedBrightness = -1;
+bool nightModeAuto = true, isLargeText = true, forceNightMode = false;
+
+int nightStartHour = 23;
+int nightEndHour = 7;
+bool nightEyesEnable = true;
+int eyeType = 6;
+String eyeColorHex = "#FF8C00";
+bool forceTerminator = false;
+
+// === ПЕРЕМЕННЫЕ ЭКРАНОВ ===
+bool showTerminatorFlag = false;
+int terminatorShowSec = 10;
+bool showCarDashFlag = true;
+int carDashShowSec = 10;
+bool showBttfFlag = false;
+int bttfShowSec = 10;
+bool showPipBoyFlag = false;
+int pipBoyShowSec = 10;
+bool showPredatorFlag = false;
+int predatorShowSec = 10;
+bool showMatrixFlag = false;
+int matrixShowSec = 10;
+bool showSauronFlag = false;
+int sauronShowSec = 10;
+bool showCyberFlag = false;
+int cyberShowSec = 10;
+bool showSpaceFlag = false;
+int spaceShowSec = 10;
+bool showPongFlag = false;
+int pongShowSec = 10;
+bool showF16Flag = false;
+int f16ShowSec = 10;
+
+uint16_t getColor(uint8_t r, uint8_t g, uint8_t b) {
+  uint8_t r_scaled = (r * appliedBrightness) / 255;
+  uint8_t g_scaled = (g * appliedBrightness) / 255;
+  uint8_t b_scaled = (b * appliedBrightness) / 255;
+  return matrix.color565(r_scaled, g_scaled, b_scaled);
+}
+
+enum ScrollMode { SCROLL_NONE,
+                  SCROLL_ONCE,
+                  SCROLL_LOOP };
+ScrollMode currentScrollMode = SCROLL_NONE;
+enum ScrollSource { SRC_TELEGRAM,
+                    SRC_NEWS,
+                    SRC_JOKE,
+                    SRC_BDAY };
+ScrollSource currentScrollSource = SRC_TELEGRAM;
+
+int scrollX = PANEL_RES_X, textWidth = 0, scrollSpeed = 25;
+unsigned long lastScrollUpdate = 0;
+bool showClockFlag = true, showWeatherFlag = true, showExtWeatherFlag = true, showCurrencyFlag = true, showCountdownFlag = true, showGraphFlag = true;
+bool showSunFlag = true;
+int clockShowSec = 15, weatherShowSec = 4, extWeatherShowSec = 4, currencyShowSec = 4, countdownShowSec = 4, graphShowSec = 5;
+int sunShowSec = 4, bdayPhotoShowSec = 6;
+int currentBdayImage = 1;
+
+int animType = 19, activeAnimType = 0;
+int activeScreens[25];  // Увеличили размер массива с запасом!
+int numActiveScreens = 0, currentScreenIdx = 0, nextScreenIdx = 0;
+bool isAnimating = false;
+unsigned long lastSwitchTime = 0, animStartTime = 0;
+
+unsigned long timerEndTime = 0;
+bool timerActive = false, timerAlert = false;
+int timerMinutesInput = 1;
+unsigned long alertStartTime = 0;
+unsigned long lastAlertSoundTime = 0;
+
+String countdownTargetDate = "2027-01-01";
+String countdownEventName = "до нового года";
+int daysRemaining = 0;
+
+unsigned long lastDataUpdate = 0;
+bool dataLoaded = false;
+const char *daysOfWeek[] = { "Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота" };
+const char *monthsRu[] = { "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря" };
+struct tm globalTimeInfo;
+bool globalTimeOk = false;
+unsigned long lastTimeCheck = 0;
+static int lastChimeHour = -1;
+static int lastBdayCheckMin = -1;
+
+// ================= ЭФФЕКТЫ ФОНА =================
+int currentEffectIdx = 0;
+struct Flake {
+  float x, y, speed;
+};
+Flake flakes[70];
+int matrixDrops[PANEL_RES_X];
+struct Star {
+  float x, y, z, speed;
+};
+Star stars[120];
+struct Spark {
+  float x, y, vx, vy;
+  int age, max_age;
+  uint16_t color;
+};
+Spark sparks[90];
+float cubeAngleX = 0, cubeAngleY = 0, cubeAngleZ = 0;
+const float cubeVertices[8][3] = { { -1, -1, -1 }, { 1, -1, -1 }, { 1, 1, -1 }, { -1, 1, -1 }, { -1, -1, 1 }, { 1, -1, 1 }, { 1, 1, 1 }, { -1, 1, 1 } };
+const int cubeEdges[12][2] = { { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
+float pyrAngleX = 0, pyrAngleY = 0, pyrAngleZ = 0;
+const float pyrVerts[5][3] = { { -1, -1, -1 }, { 1, -1, -1 }, { 1, 1, -1 }, { -1, 1, -1 }, { 0, 0, 1.2 } };
+const int pyrEdges[8][2] = { { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, { 0, 4 }, { 1, 4 }, { 2, 4 }, { 3, 4 } };
+struct Ball {
+  float x, y, vx, vy;
+  int r;
+  uint16_t color;
+};
+Ball balls[10];
+float waveOffset1 = 0, waveOffset2 = 0;
+
+void initEffects() {
+  for (int i = 0; i < 70; i++) {
+    flakes[i].x = random(PANEL_RES_X);
+    flakes[i].y = random(64);
+    flakes[i].speed = random(5, 25) / 10.0;
+  }
+  for (int i = 0; i < PANEL_RES_X; i++) matrixDrops[i] = random(-100, 0);
+  for (int i = 0; i < 120; i++) {
+    stars[i].x = random(-128, 128);
+    stars[i].y = random(-32, 32);
+    stars[i].z = random(1, 64);
+    stars[i].speed = random(1, 3) / 10.0;
+  }
+  for (int i = 0; i < 90; i++) sparks[i].age = 999;
+  for (int i = 0; i < 10; i++) {
+    balls[i].x = random(10, PANEL_RES_X - 10);
+    balls[i].y = random(10, 54);
+    balls[i].vx = (random(0, 2) == 0 ? 1 : -1) * (random(10, 25) / 10.0);
+    balls[i].vy = (random(0, 2) == 0 ? 1 : -1) * (random(10, 25) / 10.0);
+    balls[i].r = random(3, 7);
+    balls[i].color = matrix.color565(random(100, 255), random(100, 255), random(100, 255));
+  }
+}
+
+void updateSnow() {
+  for (int i = 0; i < 70; i++) {
+    matrix.drawPixel(flakes[i].x, flakes[i].y, getColor(200, 200, 200));
+    flakes[i].y += flakes[i].speed;
+    if (flakes[i].y > 64) {
+      flakes[i].y = 0;
+      flakes[i].x = random(PANEL_RES_X);
+    }
+  }
+}
+void updateMatrix() {
+  for (int i = 0; i < PANEL_RES_X; i += 2) {
+    if (matrixDrops[i] >= 0 && matrixDrops[i] < PANEL_RES_Y) {
+      matrix.drawPixel(i, matrixDrops[i], getColor(0, 255, 0));
+      if (matrixDrops[i] > 0) matrix.drawPixel(i, matrixDrops[i] - 1, getColor(0, 150, 0));
+      if (matrixDrops[i] > 1) matrix.drawPixel(i, matrixDrops[i] - 2, getColor(0, 50, 0));
+    }
+    matrixDrops[i]++;
+    if (matrixDrops[i] > PANEL_RES_Y + random(0, 50)) matrixDrops[i] = random(-20, 0);
+  }
+}
+void updateRain() {
+  for (int i = 0; i < PANEL_RES_X; i += 2) {
+    if (matrixDrops[i] >= 0 && matrixDrops[i] < PANEL_RES_Y) {
+      matrix.drawPixel(i, matrixDrops[i], getColor(100, 150, 255));
+      if (matrixDrops[i] > 0) matrix.drawPixel(i, matrixDrops[i] - 1, getColor(50, 100, 200));
+      if (matrixDrops[i] > 1) matrix.drawPixel(i, matrixDrops[i] - 2, getColor(0, 50, 100));
+    }
+    matrixDrops[i] += random(1, 3);
+    if (matrixDrops[i] > PANEL_RES_Y + random(0, 50)) matrixDrops[i] = random(-20, 0);
+  }
+}
+void updateStars() {
+  for (int i = 0; i < 120; i++) {
+    stars[i].z -= stars[i].speed;
+    if (stars[i].z <= 0) {
+      stars[i].x = random(-128, 128);
+      stars[i].y = random(-32, 32);
+      stars[i].z = 64;
+    }
+    int sx = (stars[i].x / stars[i].z * 30) + (PANEL_RES_X / 2);
+    int sy = (stars[i].y / stars[i].z * 30) + 32;
+    if (sx >= 0 && sx < PANEL_RES_X && sy >= 0 && sy < 64) {
+      int bri = 255 - (stars[i].z * 4);
+      if (bri < 0) bri = 0;
+      matrix.drawPixel(sx, sy, getColor(bri, bri, bri));
+    }
+  }
+}
+void initFireworks() {
+  int cx = random(30, PANEL_RES_X - 30), cy = random(10, 30);
+  uint16_t col = matrix.color565(random(100, 255), random(100, 255), random(100, 255));
+  for (int i = 0; i < 90; i++) {
+    sparks[i].x = cx;
+    sparks[i].y = cy;
+    float angle = random(0, 360) * 3.1415 / 180.0;
+    float speed = random(10, 35) / 10.0;
+    sparks[i].vx = cos(angle) * speed;
+    sparks[i].vy = sin(angle) * speed;
+    sparks[i].age = 0;
+    sparks[i].max_age = random(15, 35);
+    sparks[i].color = col;
+  }
+}
+void updateFireworks() {
+  bool active = false;
+  for (int i = 0; i < 90; i++) {
+    if (sparks[i].age < sparks[i].max_age) {
+      active = true;
+      matrix.drawPixel(sparks[i].x, sparks[i].y, sparks[i].color);
+      sparks[i].x += sparks[i].vx;
+      sparks[i].y += sparks[i].vy;
+      sparks[i].vy += 0.05;
+      sparks[i].age++;
+    }
+  }
+  if (!active && random(0, 100) < 3) initFireworks();
+}
+void update3DCube() {
+  cubeAngleX += 0.03;
+  cubeAngleY += 0.02;
+  cubeAngleZ += 0.01;
+  int projected[8][2];
+  uint8_t r = (sin(millis() / 500.0) * 127) + 128, g = (sin(millis() / 700.0) * 127) + 128, b = (sin(millis() / 900.0) * 127) + 128;
+  uint16_t cubeColor = getColor(r, g, b);
+  for (int i = 0; i < 8; i++) {
+    float x = cubeVertices[i][0], y = cubeVertices[i][1], z = cubeVertices[i][2];
+    float xy = cos(cubeAngleX) * y - sin(cubeAngleX) * z, xz = sin(cubeAngleX) * y + cos(cubeAngleX) * z;
+    y = xy;
+    z = xz;
+    float yx = cos(cubeAngleY) * x + sin(cubeAngleY) * z, yz = -sin(cubeAngleY) * x + cos(cubeAngleY) * z;
+    x = yx;
+    z = yz;
+    float zx = cos(cubeAngleZ) * x - sin(cubeAngleZ) * y, zy = sin(cubeAngleZ) * x + cos(cubeAngleZ) * y;
+    x = zx;
+    y = zy;
+    float dist = 2.8;
+    projected[i][0] = (x * 35 / (z + dist)) + (PANEL_RES_X / 2);
+    projected[i][1] = (y * 35 / (z + dist)) + 32;
+  }
+  for (int i = 0; i < 12; i++) { matrix.drawLine(projected[cubeEdges[i][0]][0], projected[cubeEdges[i][0]][1], projected[cubeEdges[i][1]][0], projected[cubeEdges[i][1]][1], cubeColor); }
+}
+void update3DPyramid() {
+  pyrAngleX += 0.03;
+  pyrAngleY += 0.02;
+  pyrAngleZ += 0.01;
+  int projected[5][2];
+  uint8_t r = (sin(millis() / 400.0) * 127) + 128, g = (sin(millis() / 600.0) * 127) + 128, b = (sin(millis() / 800.0) * 127) + 128;
+  uint16_t pyrColor = getColor(r, g, b);
+  for (int i = 0; i < 5; i++) {
+    float x = pyrVerts[i][0], y = pyrVerts[i][1], z = pyrVerts[i][2];
+    float xy = cos(pyrAngleX) * y - sin(pyrAngleX) * z, xz = sin(pyrAngleX) * y + cos(pyrAngleX) * z;
+    y = xy;
+    z = xz;
+    float yx = cos(pyrAngleY) * x + sin(pyrAngleY) * z, yz = -sin(pyrAngleY) * x + cos(pyrAngleY) * z;
+    x = yx;
+    z = yz;
+    float zx = cos(pyrAngleZ) * x - sin(pyrAngleZ) * y, zy = sin(pyrAngleZ) * x + cos(pyrAngleZ) * y;
+    x = zx;
+    y = zy;
+    float dist = 2.8;
+    projected[i][0] = (x * 40 / (z + dist)) + (PANEL_RES_X / 2);
+    projected[i][1] = (y * 40 / (z + dist)) + 32;
+  }
+  for (int i = 0; i < 8; i++) { matrix.drawLine(projected[pyrEdges[i][0]][0], projected[pyrEdges[i][0]][1], projected[pyrEdges[i][1]][0], projected[pyrEdges[i][1]][1], pyrColor); }
+}
+
+void updateSand() {
+  if (!accelFound) return;
+  sensors_event_t event;
+  lis.getEvent(&event);
+  sandSim.iterate(event.acceleration.x * 10, -event.acceleration.y * 10, 0);
+  uint16_t sandColor = getColor(255, 200, 50);
+  for (int i = 0; i < 2000; i++) {
+    uint16_t x, y;
+    sandSim.getPosition(i, &x, &y);
+    matrix.drawPixel(x, y, sandColor);
+  }
+}
+
+void updateBalls() {
+  for (int i = 0; i < 10; i++) {
+    balls[i].x += balls[i].vx;
+    balls[i].y += balls[i].vy;
+    if (balls[i].x - balls[i].r <= 0 || balls[i].x + balls[i].r >= PANEL_RES_X - 1) balls[i].vx *= -1;
+    if (balls[i].y - balls[i].r <= 0 || balls[i].y + balls[i].r >= 63) balls[i].vy *= -1;
+    matrix.fillCircle(balls[i].x, balls[i].y, balls[i].r, balls[i].color);
+  }
+}
+void updateWaves() {
+  waveOffset1 += 0.05;
+  waveOffset2 -= 0.03;
+  for (int x = 0; x < PANEL_RES_X; x += 3) {
+    int y1 = 32 + sin(x * 0.05 + waveOffset1) * 16;
+    int y2 = 32 + cos(x * 0.08 + waveOffset2) * 12;
+    matrix.fillCircle(x, y1, 1, getColor(0, 255, 255));
+    matrix.fillCircle(x, y2, 1, getColor(255, 0, 255));
+  }
+}
+
+// ================= ФУНКЦИИ ПАМЯТИ =================
+uint16_t hexToRGB565(String hex) {
+  if (hex.startsWith("#")) hex.remove(0, 1);
+  long rgb = strtol(hex.c_str(), NULL, 16);
+  return getColor((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+}
+
+void loadSettings() {
+  preferences.begin("matrix_cfg", false);
+  currentBrightness = preferences.getInt("br", 80);
+  appliedBrightness = currentBrightness;
+  nightModeAuto = preferences.getBool("nm", true);
+  nightStartHour = preferences.getInt("nsh", 23);
+  nightEndHour = preferences.getInt("neh", 7);
+  forceNightMode = preferences.getBool("fnm", false);
+  nightEyesEnable = preferences.getBool("nee", true);
+  eyeType = preferences.getInt("eyet", 6);
+  eyeColorHex = preferences.getString("eyec", "#FF8C00");
+  currentVolume = preferences.getInt("vol", 18);
+  nightSoundMute = preferences.getBool("nsm", true);
+  birthdayList = preferences.getString("bdays", "");
+  clockColorHex = preferences.getString("ccHex", "#00FFFF");
+  textColorHex = preferences.getString("tcHex", "#00FF00");
+  dateColorHex = preferences.getString("dcHex", "#969696");
+  scrollSpeed = preferences.getInt("sp", 25);
+  newsScrollSpeed = preferences.getInt("nsp", 30);
+  isLargeText = preferences.getBool("lt", true);
+  animType = preferences.getInt("at", 19);
+  currentEffectIdx = preferences.getInt("eff", 0);
+
+  showClockFlag = preferences.getBool("scl", true);
+  showWeatherFlag = preferences.getBool("sw", true);
+  showExtWeatherFlag = preferences.getBool("sew", true);
+  showCurrencyFlag = preferences.getBool("scu", true);
+  showCountdownFlag = preferences.getBool("sco", true);
+  showGraphFlag = preferences.getBool("sgr", true);
+  showNewsFlag = preferences.getBool("snews", false);
+  showJokeFlag = preferences.getBool("sjoke", true);
+  showSunFlag = preferences.getBool("ssun", true);
+  showTerminatorFlag = preferences.getBool("sterm", false);
+  showCarDashFlag = preferences.getBool("scar", true);
+  showBttfFlag = preferences.getBool("sbttf", false);
+  showPipBoyFlag = preferences.getBool("spip", false);
+  showPredatorFlag = preferences.getBool("spred", false);
+  showMatrixFlag = preferences.getBool("smatr", false);
+  showSauronFlag = preferences.getBool("ssaur", false);
+  showCyberFlag = preferences.getBool("scyb", false);
+  showSpaceFlag = preferences.getBool("sspc", false);
+  showPongFlag = preferences.getBool("spng", false);
+  showF16Flag = preferences.getBool("sf16", false);
+
+  terminatorShowSec = preferences.getInt("tterm", 10);
+  carDashShowSec = preferences.getInt("tcar", 10);
+  bttfShowSec = preferences.getInt("tbttf", 10);
+  pipBoyShowSec = preferences.getInt("tpip", 10);
+  predatorShowSec = preferences.getInt("tpred", 10);
+  matrixShowSec = preferences.getInt("tmatr", 10);
+  sauronShowSec = preferences.getInt("tsaur", 10);
+  cyberShowSec = preferences.getInt("tcyb", 10);
+  spaceShowSec = preferences.getInt("tspc", 10);
+  pongShowSec = preferences.getInt("tpng", 10);
+  f16ShowSec = preferences.getInt("tf16", 10);
+
+  newsIntervalMins = preferences.getInt("nim", 2);
+  jokeIntervalMins = preferences.getInt("jim", 5);
+  clockShowSec = preferences.getInt("tcl", 15);
+  weatherShowSec = preferences.getInt("tw", 4);
+  extWeatherShowSec = preferences.getInt("tew", 4);
+  currencyShowSec = preferences.getInt("tcu", 4);
+  countdownShowSec = preferences.getInt("tco", 4);
+  graphShowSec = preferences.getInt("tgr", 5);
+  sunShowSec = preferences.getInt("tsun", 4);
+
+  tgToken = preferences.getString("tgt", "8231470801:AAGfa479WYby3h2iFNDOQVisE1b75tCA1eY");
+  countdownTargetDate = preferences.getString("cdate", "2027-01-01");
+  countdownEventName = preferences.getString("cname", "до нового года");
+  weatherLat = preferences.getString("lat", "44.2104");
+  weatherLon = preferences.getString("lon", "43.1353");
+}
+
+void saveSettings() {
+  preferences.putInt("br", currentBrightness);
+  preferences.putBool("nm", nightModeAuto);
+  preferences.putInt("nsh", nightStartHour);
+  preferences.putInt("neh", nightEndHour);
+  preferences.putBool("fnm", forceNightMode);
+  preferences.putBool("nee", nightEyesEnable);
+  preferences.putInt("eyet", eyeType);
+  preferences.putString("eyec", eyeColorHex);
+  preferences.putInt("vol", currentVolume);
+  preferences.putBool("nsm", nightSoundMute);
+  preferences.putString("bdays", birthdayList);
+  preferences.putString("ccHex", clockColorHex);
+  preferences.putString("tcHex", textColorHex);
+  preferences.putString("dcHex", dateColorHex);
+  preferences.putInt("sp", scrollSpeed);
+  preferences.putInt("nsp", newsScrollSpeed);
+  preferences.putBool("lt", isLargeText);
+  preferences.putInt("at", animType);
+  preferences.putInt("eff", currentEffectIdx);
+
+  preferences.putBool("scl", showClockFlag);
+  preferences.putBool("sw", showWeatherFlag);
+  preferences.putBool("sew", showExtWeatherFlag);
+  preferences.putBool("scu", showCurrencyFlag);
+  preferences.putBool("sco", showCountdownFlag);
+  preferences.putBool("sgr", showGraphFlag);
+  preferences.putBool("snews", showNewsFlag);
+  preferences.putBool("sjoke", showJokeFlag);
+  preferences.putBool("ssun", showSunFlag);
+
+  preferences.putBool("sterm", showTerminatorFlag);
+  preferences.putInt("tterm", terminatorShowSec);
+  preferences.putBool("scar", showCarDashFlag);
+  preferences.putInt("tcar", carDashShowSec);
+  preferences.putBool("sbttf", showBttfFlag);
+  preferences.putInt("tbttf", bttfShowSec);
+  preferences.putBool("spip", showPipBoyFlag);
+  preferences.putInt("tpip", pipBoyShowSec);
+  preferences.putBool("spred", showPredatorFlag);
+  preferences.putInt("tpred", predatorShowSec);
+  preferences.putBool("smatr", showMatrixFlag);
+  preferences.putInt("tmatr", matrixShowSec);
+  preferences.putBool("ssaur", showSauronFlag);
+  preferences.putInt("tsaur", sauronShowSec);
+  preferences.putBool("scyb", showCyberFlag);
+  preferences.putInt("tcyb", cyberShowSec);
+  preferences.putBool("sspc", showSpaceFlag);
+  preferences.putInt("tspc", spaceShowSec);
+  preferences.putBool("spng", showPongFlag);
+  preferences.putInt("tpng", pongShowSec);
+  preferences.putBool("sf16", showF16Flag);
+  preferences.putInt("tf16", f16ShowSec);
+
+  preferences.putInt("nim", newsIntervalMins);
+  preferences.putInt("jim", jokeIntervalMins);
+  preferences.putInt("tcl", clockShowSec);
+  preferences.putInt("tw", weatherShowSec);
+  preferences.putInt("tew", extWeatherShowSec);
+  preferences.putInt("tcu", currencyShowSec);
+  preferences.putInt("tco", countdownShowSec);
+  preferences.putInt("tgr", graphShowSec);
+  preferences.putInt("tsun", sunShowSec);
+
+  preferences.putString("tgt", tgToken);
+  preferences.putString("cdate", countdownTargetDate);
+  preferences.putString("cname", countdownEventName);
+  preferences.putString("lat", weatherLat);
+  preferences.putString("lon", weatherLon);
+}
+
+// ================= ЧТЕНИЕ SD КАРТЫ =================
+uint16_t read16(File &f) {
+  uint16_t result;
+  ((uint8_t *)&result)[0] = f.read();
+  ((uint8_t *)&result)[1] = f.read();
+  return result;
+}
+uint32_t read32(File &f) {
+  uint32_t result;
+  ((uint8_t *)&result)[0] = f.read();
+  ((uint8_t *)&result)[1] = f.read();
+  ((uint8_t *)&result)[2] = f.read();
+  ((uint8_t *)&result)[3] = f.read();
+  return result;
+}
+
+void drawBmp(const char *filename, int16_t x, int16_t y) {
+  if ((x >= PANEL_RES_X) || (y >= 64) || (x + 128 < 0)) return;
+  File bmpFile = SD.open(filename);
+  if (!bmpFile) return;
+  uint32_t seekOffset, w, h;
+  if (read16(bmpFile) == 0x4D42) {
+    read32(bmpFile);
+    read32(bmpFile);
+    seekOffset = read32(bmpFile);
+    read32(bmpFile);
+    w = read32(bmpFile);
+    h = read32(bmpFile);
+    if (read16(bmpFile) == 1 && read16(bmpFile) == 24 && read32(bmpFile) == 0) {
+      int rowSize = (w * 3 + 3) & ~3;
+      uint8_t lineBuffer[rowSize];
+      for (int row = 0; row < h; row++) {
+        int drawY = y + h - 1 - row;
+        if (drawY < 0 || drawY >= 64) continue;
+        bmpFile.seek(seekOffset + row * rowSize);
+        bmpFile.read(lineBuffer, rowSize);
+        for (int col = 0; col < w; col++) {
+          int drawX = x + col;
+          if (drawX < 0 || drawX >= PANEL_RES_X) continue;
+          uint8_t b = lineBuffer[col * 3], g = lineBuffer[col * 3 + 1], r = lineBuffer[col * 3 + 2];
+          if (r > 5 || g > 5 || b > 5) matrix.drawPixel(drawX, drawY, getColor(r, g, b));
+        }
+      }
+    }
+  }
+  bmpFile.close();
+}
+
+// ================= ФУНКЦИИ ТЕКСТА И ТЕЛЕГРАМ =================
+String parseTelegramEmojis(String text) {
+  text.replace("❤️", "[heart]");
+  text.replace("😀", "[smile]");
+  text.replace("😊", "[smile]");
+  text.replace("👍", "[like]");
+  text.replace("🔥", "[fire]");
+  text.replace("😂", "[laugh]");
+  text.replace("😎", "[cool]");
+  text.replace("😢", "[cry]");
+  text.replace("😡", "[angry]");
+  text.replace("🚗", "[car]");
+  text.replace("⭐", "[star]");
+  text.replace("🍺", "[beer]");
+  text.replace("🎉", "[party]");
+  text.replace(" ", "[Flower]");
+  return text;
+}
+String cp1251_to_utf8(String cp1251) {
+  String res = "";
+  res.reserve(cp1251.length() * 2);
+  for (int i = 0; i < cp1251.length(); i++) {
+    uint8_t c = cp1251[i];
+    if (c < 128) res += (char)c;
+    else if (c >= 192 && c <= 239) {
+      res += (char)0xD0;
+      res += (char)(c - 48);
+    } else if (c >= 240 && c <= 255) {
+      res += (char)0xD1;
+      res += (char)(c - 112);
+    } else if (c == 168) {
+      res += (char)0xD0;
+      res += (char)0x81;
+    } else if (c == 184) {
+      res += (char)0xD1;
+      res += (char)0x91;
+    } else {
+      res += ' ';
+    }
+  }
+  return res;
+}
+int getMixedTextWidth(String text) {
+  int w = 0, i = 0;
+  while (i < text.length()) {
+    int tagStart = text.indexOf('[', i);
+    if (tagStart == -1) {
+      w += u8g2_fonts.getUTF8Width(text.substring(i).c_str());
+      break;
+    }
+    w += u8g2_fonts.getUTF8Width(text.substring(i, tagStart).c_str());
+    int tagEnd = text.indexOf(']', tagStart);
+    if (tagEnd != -1) {
+      w += 26;
+      i = tagEnd + 1;
+    } else {
+      w += u8g2_fonts.getUTF8Width("[");
+      i = tagStart + 1;
+    }
+  }
+  return w;
+}
+void drawMixedText(String text, int x, int y) {
+  int currX = x, i = 0;
+  while (i < text.length()) {
+    int tagStart = text.indexOf('[', i);
+    if (tagStart == -1) {
+      u8g2_fonts.setCursor(currX, y);
+      u8g2_fonts.print(text.substring(i));
+      break;
+    }
+    String sub = text.substring(i, tagStart);
+    u8g2_fonts.setCursor(currX, y);
+    u8g2_fonts.print(sub);
+    currX += u8g2_fonts.getUTF8Width(sub.c_str());
+    int tagEnd = text.indexOf(']', tagStart);
+    if (tagEnd != -1) {
+      String tag = text.substring(tagStart + 1, tagEnd);
+      String filename = "/" + tag + ".bmp";
+      drawBmp(filename.c_str(), currX, y - 24);
+      currX += 26;
+      i = tagEnd + 1;
+    } else {
+      u8g2_fonts.setCursor(currX, y);
+      u8g2_fonts.print("[");
+      currX += u8g2_fonts.getUTF8Width("[");
+      i = tagStart + 1;
+    }
+  }
+}
+
+void buildScreenSequence() {
+  numActiveScreens = 0;
+  if (showClockFlag) activeScreens[numActiveScreens++] = 0;
+  if (hasBirthdayToday) activeScreens[numActiveScreens++] = 9;
+  if (showWeatherFlag) activeScreens[numActiveScreens++] = 1;
+  if (showExtWeatherFlag) activeScreens[numActiveScreens++] = 2;
+  if (showSunFlag) activeScreens[numActiveScreens++] = 6;
+  if (showGraphFlag) activeScreens[numActiveScreens++] = 5;
+  if (showCarDashFlag) activeScreens[numActiveScreens++] = 8;
+  if (showBttfFlag) activeScreens[numActiveScreens++] = 11;
+  if (showPipBoyFlag) activeScreens[numActiveScreens++] = 12;
+  if (showPredatorFlag) activeScreens[numActiveScreens++] = 13;
+  if (showMatrixFlag) activeScreens[numActiveScreens++] = 14;
+  if (showSauronFlag) activeScreens[numActiveScreens++] = 15;
+  if (showCyberFlag) activeScreens[numActiveScreens++] = 16;
+  if (showSpaceFlag) activeScreens[numActiveScreens++] = 17;
+  if (showPongFlag) activeScreens[numActiveScreens++] = 18;
+  if (showF16Flag) activeScreens[numActiveScreens++] = 19;
+  if (showCurrencyFlag) activeScreens[numActiveScreens++] = 3;
+  if (showCountdownFlag) activeScreens[numActiveScreens++] = 4;
+  if (showTerminatorFlag) activeScreens[numActiveScreens++] = 10;
+  if (numActiveScreens == 0) activeScreens[numActiveScreens++] = 0;
+  if (currentScreenIdx >= numActiveScreens) currentScreenIdx = 0;
+}
+void updateTextWidth() {
+  u8g2_fonts.setFont(isLargeText ? u8g2_font_inr27_t_cyrillic : u8g2_font_cu12_t_cyrillic);
+  textWidth = getMixedTextWidth(currentText);
+}
+void calculateCountdown() {
+  struct tm targetInfo = { 0 };
+  int yr, mo, dy;
+  if (sscanf(countdownTargetDate.c_str(), "%d-%d-%d", &yr, &mo, &dy) == 3) {
+    targetInfo.tm_year = yr - 1900;
+    targetInfo.tm_mon = mo - 1;
+    targetInfo.tm_mday = dy;
+    targetInfo.tm_isdst = -1;
+    daysRemaining = (mktime(&targetInfo) - time(NULL)) / 86400;
+  }
+}
+
+void checkBirthdays() {
+  if (!globalTimeOk || birthdayList.length() == 0) {
+    hasBirthdayTomorrow = false;
+    hasBirthdayToday = false;
+    return;
+  }
+  time_t now = time(NULL);
+  struct tm *tm_today = localtime(&now);
+  char todayStr[10];
+  sprintf(todayStr, "%02d.%02d", tm_today->tm_mday, tm_today->tm_mon + 1);
+  String searchToday = String(todayStr);
+  time_t tomorrow = now + 86400;
+  struct tm *tm_tom = localtime(&tomorrow);
+  char tomStr[10];
+  sprintf(tomStr, "%02d.%02d", tm_tom->tm_mday, tm_tom->tm_mon + 1);
+  String searchTom = String(tomStr);
+
+  hasBirthdayTomorrow = false;
+  tomorrowBirthdaysNames = "";
+  hasBirthdayToday = false;
+  todayBirthdaysNames = "";
+  int startIdx = 0;
+  while (startIdx < birthdayList.length()) {
+    int commaIdx = birthdayList.indexOf(',', startIdx);
+    if (commaIdx == -1) commaIdx = birthdayList.length();
+    String entry = birthdayList.substring(startIdx, commaIdx);
+    entry.trim();
+    if (entry.endsWith(searchTom)) {
+      int spaceIdx = entry.lastIndexOf(' ');
+      String name = (spaceIdx != -1) ? entry.substring(0, spaceIdx) : "Кто-то";
+      if (tomorrowBirthdaysNames.length() > 0) tomorrowBirthdaysNames += " и ";
+      tomorrowBirthdaysNames += name;
+      hasBirthdayTomorrow = true;
+    }
+    if (entry.endsWith(searchToday)) {
+      int spaceIdx = entry.lastIndexOf(' ');
+      String name = (spaceIdx != -1) ? entry.substring(0, spaceIdx) : "Кто-то";
+      if (todayBirthdaysNames.length() > 0) todayBirthdaysNames += " и ";
+      todayBirthdaysNames += name;
+      hasBirthdayToday = true;
+    }
+    startIdx = commaIdx + 1;
+  }
+  buildScreenSequence();
+}
+
+void sendTelegramReply(String chatId, String text) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  String url = "https://api.telegram.org/bot" + tgToken + "/sendMessage";
+  http.begin(client, url);
+  http.addHeader("Content-Type", "application/json");
+  JsonDocument doc;
+  doc["chat_id"] = chatId;
+  doc["text"] = text;
+  String payload;
+  serializeJson(doc, payload);
+  http.POST(payload);
+  http.end();
+}
+
+void checkTelegram() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(4000);
+  String url = "https://api.telegram.org/bot" + tgToken + "/getUpdates?limit=1&offset=" + String(lastTgUpdateId + 1);
+  http.begin(client, url);
+  if (http.GET() == 200) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, http.getString())) {
+      if (doc["ok"] == true && doc["result"].size() > 0) {
+        lastTgUpdateId = doc["result"][0]["update_id"];
+        String msgText = doc["result"][0]["message"]["text"].as<String>();
+        String chatId = doc["result"][0]["message"]["chat"]["id"].as<String>();
+        String parsedText = parseTelegramEmojis(msgText);
+        if (parsedText.length() > 0) {
+          if (msgText.startsWith("/")) {
+            String cmd = msgText;
+            cmd.toLowerCase();
+            if (cmd == "/term") {
+              eyeType = 5;
+              forceTerminator = true;
+              sendTelegramReply(chatId, "🤖 Режим Терминатора активирован!");
+            } else if (cmd == "/clock") {
+              forceTerminator = false;
+              sendTelegramReply(chatId, "🕒 Возвращаюсь в режим обычных часов.");
+            } else if (cmd.startsWith("/br ")) {
+              int newBr = cmd.substring(4).toInt();
+              currentBrightness = constrain(newBr, 1, 255);
+              sendTelegramReply(chatId, "☀️ Яркость установлена на " + String(currentBrightness));
+            } else if (cmd.startsWith("/vol ")) {
+              int newVol = cmd.substring(5).toInt();
+              currentVolume = constrain(newVol, 0, 30);
+              if (diagMP3) myDFPlayer.volume(currentVolume);
+              sendTelegramReply(chatId, "🔊 Громкость установлена на " + String(currentVolume));
+            } else {
+              sendTelegramReply(chatId, "❓ Неизвестная команда.\nДоступно:\n/term - Терминатор\n/clock - Часы\n/br [1-255] - Яркость\n/vol [0-30] - Громкость");
+            }
+            saveSettings();
+          } else {
+            currentText = parsedText;
+            currentScrollSource = SRC_TELEGRAM;
+            newTelegramMessage = true;
+          }
+        }
+      }
+    }
+  }
+  http.end();
+}
+
+void fetchJoke() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  http.setTimeout(5000);
+  http.begin("http://rzhunemogu.ru/Rand.aspx?CType=1");
+  if (http.GET() == 200) {
+    String payload = http.getString();
+    int start = payload.indexOf("<content>");
+    int end = payload.indexOf("</content>");
+    if (start != -1 && end != -1) {
+      String rawJoke = payload.substring(start + 9, end);
+      rawJoke.replace("\r\n", "  ");
+      rawJoke.replace("\n", "  ");
+      jokeText = " 🤡 АНЕКДОТ: " + cp1251_to_utf8(rawJoke) + "   *** ";
+    }
+  }
+  http.end();
+}
+void fetchNews() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(6000);
+  http.begin(client, "https://lenta.ru/rss/news");
+  if (http.GET() == 200) {
+    String payload = http.getString();
+    String parsedNews = " 🌍 ГЛАВНЫЕ новости: ";
+    int startIndex = payload.indexOf("<title>");
+    if (startIndex != -1) startIndex += 7;
+    int count = 0;
+    while (count < 4) {
+      startIndex = payload.indexOf("<title>", startIndex);
+      if (startIndex == -1) break;
+      startIndex += 7;
+      int endIndex = payload.indexOf("</title>", startIndex);
+      if (endIndex != -1) {
+        String title = payload.substring(startIndex, endIndex);
+        title.replace("<![CDATA[", "");
+        title.replace("]]>", "");
+        parsedNews += " • " + title;
+        count++;
+      }
+    }
+    if (count > 0) newsText = parsedNews + "   *** ";
+  }
+  http.end();
+}
+
+void fetchAllData() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  http.setTimeout(4000);
+  String urlWeather = "http://api.openweathermap.org/data/2.5/weather?lat=" + weatherLat + "&lon=" + weatherLon + "&appid=de96804e73a17f33576c4e8dc1551bf2&units=metric&lang=ru";
+  http.begin(urlWeather);
+  if (http.GET() == 200) {
+    JsonDocument doc;
+    deserializeJson(doc, http.getString());
+    int t = (int)doc["main"]["temp"];
+    currentTemp = (t > 0 ? "+" : "") + String(t);
+    currentWeatherDesc = doc["weather"][0]["description"].as<String>();
+    weatherIconCode = doc["weather"][0]["icon"].as<String>();
+    currentHumidity = String((int)doc["main"]["humidity"]);
+    currentWind = String((float)doc["wind"]["speed"], 1);
+    int fl = (int)doc["main"]["feels_like"];
+    currentFeelsLike = (fl > 0 ? "+" : "") + String(fl);
+    if (doc.containsKey("name")) currentCity = doc["name"].as<String>();
+    if (doc["sys"].containsKey("sunrise") && doc["sys"].containsKey("sunset")) {
+      time_t sr = doc["sys"]["sunrise"];
+      struct tm *ti = localtime(&sr);
+      char buf[10];
+      sprintf(buf, "%02d:%02d", ti->tm_hour, ti->tm_min);
+      sunriseTime = String(buf);
+      time_t ss = doc["sys"]["sunset"];
+      ti = localtime(&ss);
+      sprintf(buf, "%02d:%02d", ti->tm_hour, ti->tm_min);
+      sunsetTime = String(buf);
+    }
+  }
+  http.end();
+  String urlForecast = "http://api.openweathermap.org/data/2.5/forecast?lat=" + weatherLat + "&lon=" + weatherLon + "&appid=de96804e73a17f33576c4e8dc1551bf2&units=metric&cnt=6";
+  http.begin(urlForecast);
+  if (http.GET() == 200) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, http.getString())) {
+      for (int i = 0; i < 6; i++) {
+        forecastTemps[i] = (int)doc["list"][i]["main"]["temp"];
+        forecastPress[i] = (int)(float(doc["list"][i]["main"]["pressure"]) * 0.75006);
+      }
+      forecastLoaded = true;
+    }
+  }
+  http.end();
+  http.begin("http://open.er-api.com/v6/latest/USD");
+  if (http.GET() == 200) {
+    JsonDocument doc;
+    deserializeJson(doc, http.getString());
+    float rub = doc["rates"]["RUB"], eur = doc["rates"]["EUR"];
+    if (rub > 0 && eur > 0) {
+      currentUsdRate = String(rub, 1);
+      currentEurRate = String(rub / eur, 1);
+      dataLoaded = true;
+    }
+  }
+  http.end();
+  calculateCountdown();
+  if (showNewsFlag) fetchNews();
+}
+
+void networkTaskCode(void *parameter) {
+  for (;;) {
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.disconnect();
+      WiFi.begin();
+      vTaskDelay(5000 / portTICK_PERIOD_MS);
+      continue;
+    }
+    unsigned long ms = millis();
+    if (ms - lastDataUpdate >= (dataLoaded ? 900000 : 10000)) {
+      fetchAllData();
+      lastDataUpdate = millis();
+    }
+    if (millis() - lastTgCheck >= 5000) {
+      checkTelegram();
+      lastTgCheck = millis();
+    }
+    if (showJokeFlag && needNewJoke) {
+      fetchJoke();
+      needNewJoke = false;
+    }
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+  }
+}
+
+// ================= ИНТЕРФЕЙС WEB =================
+void handleRoot() {
+  String s;
+  s.reserve(9500);
+  s += "<!DOCTYPE html><html lang='ru'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  s += "<style>:root{--bg:#121212;--card:#1e1e1e;--text:#eee;--primary:#0d6efd;--success:#198754;--danger:#dc3545;--gray:#555}body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;margin:0;padding:8px;font-size:14px}*{box-sizing:border-box}h2{text-align:center;margin:5px 0 10px;font-size:20px}.card{background:var(--card);border-radius:10px;padding:12px;margin-bottom:12px;box-shadow:0 2px 6px rgba(0,0,0,0.4)}.card h3{margin:0 0 10px 0;border-bottom:1px solid #333;padding-bottom:5px;font-size:15px;color:#fff}input[type=text],input[type=number],input[type=date],select{width:100%;padding:8px;margin:3px 0;background:#2d2d2d;border:1px solid #444;border-radius:6px;color:#fff;font-size:14px;outline:none}input[type=color]{width:50px;height:30px;border:none;border-radius:6px;background:none;cursor:pointer;padding:0}button{width:100%;padding:10px;margin:4px 0;border:none;border-radius:6px;font-size:14px;font-weight:bold;color:#fff;cursor:pointer;}button:active{transform:scale(0.98)}.btn-p{background:var(--primary)}.btn-s{background:var(--success)}.btn-d{background:var(--danger)}.btn-w{background:#ef6c00}.row{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.switch{position:relative;display:inline-block;width:38px;height:20px;}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;top:0;left:0;right:0;bottom:0;background-color:var(--gray);border-radius:20px;transition:.2s}.slider:before{position:absolute;content:'';height:16px;width:16px;left:2px;bottom:2px;background-color:#fff;border-radius:50%;transition:.2s}input:checked+.slider{background-color:var(--primary)} input:checked+.slider:before{transform:translateX(18px)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}</style>";
+  s += "<script>function save() { let d = new URLSearchParams(new FormData(document.getElementById('frm'))); d.append('ajax', '1'); fetch('/update', { method: 'POST', body: d }); }</script></head><body>";
+  s += "<h2>Управление матрицей <span style='font-size:12px; color:#888;'>v" + String(FIRMWARE_VERSION, 1) + "</span></h2>";
+  s += "<form id='frm' action='/update' method='POST' onchange='save()'>";
+  auto drawToggle = [](String name, String label, bool checked, int timeVal, String timeName) {
+    String res = "<div class='row'><span>" + label + "</span> <div style='display:flex;align-items:center;gap:6px'>";
+    if (timeName != "") res += "<input type='number' name='" + timeName + "' value='" + String(timeVal) + "' style='width:50px;margin:0;text-align:center;'>с ";
+    res += "<label class='switch'><input type='checkbox' name='" + name + "' value='1' " + (checked ? "checked" : "") + "><span class='slider'></span></label></div></div>";
+    return res;
+  };
+
+  s += "<div class='card'><h3>🖥️ Экраны и Эффекты</h3>";
+  s += "<div class='row'><span>Фон:</span> <select name='eff' style='width:auto;flex:1;margin-left:10px'>";
+  s += "<option value='0' " + String(currentEffectIdx == 0 ? "selected" : "") + ">Авто (Праздники)</option><option value='1' " + String(currentEffectIdx == 1 ? "selected" : "") + ">Нет эффектов</option><option value='2' " + String(currentEffectIdx == 2 ? "selected" : "") + ">Снегопад ❄️</option><option value='3' " + String(currentEffectIdx == 3 ? "selected" : "") + ">Матрица 🟢</option><option value='4' " + String(currentEffectIdx == 4 ? "selected" : "") + ">Звезды ✨</option><option value='5' " + String(currentEffectIdx == 5 ? "selected" : "") + ">Салют 🎆</option><option value='6' " + String(currentEffectIdx == 6 ? "selected" : "") + ">3D Куб 🧊</option><option value='7' " + String(currentEffectIdx == 7 ? "selected" : "") + ">3D Пирамида 🔺</option><option value='8' " + String(currentEffectIdx == 8 ? "selected" : "") + ">Шарики 🔴</option><option value='9' " + String(currentEffectIdx == 9 ? "selected" : "") + ">Неоновые Волны 🌊</option><option value='10' " + String(currentEffectIdx == 10 ? "selected" : "") + ">Интерактивный (Погода) ⛅</option>";
+  s += "<option value='12' " + String(currentEffectIdx == 12 ? "selected" : "") + ">Песок (Гравитация) ⏳</option></select></div>";
+
+  s += drawToggle("scl", "Часы", showClockFlag, clockShowSec, "tcl");
+  s += drawToggle("sw", "Погода 1", showWeatherFlag, weatherShowSec, "tw");
+  s += drawToggle("sew", "Погода 2", showExtWeatherFlag, extWeatherShowSec, "tew");
+  s += drawToggle("ssun", "Восход / Закат", showSunFlag, sunShowSec, "tsun");
+  s += drawToggle("sgr", "Сводка Графиков", showGraphFlag, graphShowSec, "tgr");
+  s += drawToggle("scu", "Валюта", showCurrencyFlag, currencyShowSec, "tcu");
+  s += drawToggle("sco", "Событие", showCountdownFlag, countdownShowSec, "tco");
+  s += drawToggle("scar", "Приборная панель", showCarDashFlag, carDashShowSec, "tcar");
+  s += drawToggle("sbttf", "Часы DeLorean", showBttfFlag, bttfShowSec, "tbttf");
+  s += drawToggle("sterm", "Терминатор HUD", showTerminatorFlag, terminatorShowSec, "tterm");
+  s += drawToggle("spip", "Терминал Pip-Boy", showPipBoyFlag, pipBoyShowSec, "tpip");
+  s += drawToggle("spred", "Таймер Хищника", showPredatorFlag, predatorShowSec, "tpred");
+  s += drawToggle("smatr", "Матрица (Дождь)", showMatrixFlag, matrixShowSec, "tmatr");
+  s += drawToggle("ssaur", "Око Саурона", showSauronFlag, sauronShowSec, "tsaur");
+  s += drawToggle("scyb", "Киберпанк (Night City)", showCyberFlag, cyberShowSec, "tcyb");
+  s += drawToggle("sspc", "Космос (Warp Radar)", showSpaceFlag, spaceShowSec, "tspc");
+  s += drawToggle("spng", "Ретро-игра (Pong)", showPongFlag, pongShowSec, "tpng");
+  s += drawToggle("sf16", "HUD Пилота F-16", showF16Flag, f16ShowSec, "tf16");
+
+  s += "<hr style='border:none;border-top:1px solid #333;margin:8px 0'>";
+  s += "<div class='row'><span>Анимация:</span> <select name='at' style='width:auto;flex:1;margin-left:10px'>";
+  s += "<option value='0' " + String(animType == 0 ? "selected" : "") + ">Вверх</option><option value='1' " + String(animType == 1 ? "selected" : "") + ">Влево</option><option value='2' " + String(animType == 2 ? "selected" : "") + ">Вниз</option><option value='3' " + String(animType == 3 ? "selected" : "") + ">Вправо</option><option value='4' " + String(animType == 4 ? "selected" : "") + ">Диагональ 1</option><option value='5' " + String(animType == 5 ? "selected" : "") + ">Диагональ 2</option><option value='6' " + String(animType == 6 ? "selected" : "") + ">🎲 Случайная 1-6</option><option value='7' " + String(animType == 7 ? "selected" : "") + ">🟡 Пакман</option><option value='8' " + String(animType == 8 ? "selected" : "") + ">🚪 Ворота</option><option value='9' " + String(animType == 9 ? "selected" : "") + ">⚡ Молот Тора</option><option value='10' " + String(animType == 10 ? "selected" : "") + ">💨 Пиксельная пыль</option><option value='11' " + String(animType == 11 ? "selected" : "") + ">📡 Радар-сканер</option><option value='12' " + String(animType == 12 ? "selected" : "") + ">🟢 Матрица (дождь)</option><option value='13' " + String(animType == 13 ? "selected" : "") + ">📳 Землетрясение</option><option value='14' " + String(animType == 14 ? "selected" : "") + ">⏳ Песок</option><option value='15' " + String(animType == 15 ? "selected" : "") + ">📺 Ретро-ТВ</option><option value='16' " + String(animType == 16 ? "selected" : "") + ">👾 Глитч</option><option value='17' " + String(animType == 17 ? "selected" : "") + ">💥 Лазер</option><option value='18' " + String(animType == 18 ? "selected" : "") + ">🚪 Жалюзи</option><option value='19' " + String(animType == 19 ? "selected" : "") + ">🎲 Случайная ВСЕ</option></select></div></div>";
+
+  s += "<div class='card'><h3>🌙 Ночной режим</h3>";
+  s += drawToggle("fnm", "Включить принудительно", forceNightMode, 0, "");
+  s += "<div class='grid'><div class='row'><span>Спим с (ч):</span><input type='number' name='nsh' min='0' max='23' value='" + String(nightStartHour) + "' style='width:60px'></div>";
+  s += "<div class='row'><span>Будить (ч):</span><input type='number' name='neh' min='0' max='23' value='" + String(nightEndHour) + "' style='width:60px'></div></div>";
+  s += drawToggle("nm", "Авто-яркость ночью", nightModeAuto, 0, "");
+  s += drawToggle("nee", "Сонные глаза", nightEyesEnable, 0, "");
+  s += "<div class='row'><span>Тип глаз:</span> <select name='eyet' style='width:auto'>";
+  s += "<option value='0' " + String(eyeType == 0 ? "selected" : "") + ">👀 Обычные</option>";
+  s += "<option value='1' " + String(eyeType == 1 ? "selected" : "") + ">🐱 Кошачьи</option>";
+  s += "<option value='6' " + String(eyeType == 6 ? "selected" : "") + ">🦊 Лисьи (Cartoon)</option>";
+  s += "<option value='2' " + String(eyeType == 2 ? "selected" : "") + ">🤖 Киборг</option>";
+  s += "<option value='3' " + String(eyeType == 3 ? "selected" : "") + ">🌀 Гипноз</option>";
+  s += "<option value='4' " + String(eyeType == 4 ? "selected" : "") + ">👾 Пиксельные</option>";
+  s += "<option value='5' " + String(eyeType == 5 ? "selected" : "") + ">🔴 Терминатор</option></select></div>";
+  s += "<div class='row'><span>Цвет глаз:</span> <input type='color' name='eyec' value='" + eyeColorHex + "'></div></div>";
+
+  s += "<div class='card'><h3>🔊 Громкость и Звук</h3>";
+  s += "<span>Громкость DFPlayer:</span><input type='range' name='vol' min='0' max='30' value='" + String(currentVolume) + "'>";
+  s += "<div class='row' style='margin-top:10px'><span>🔇 Тишина ночью:</span> <label class='switch'><input type='checkbox' name='nsm' value='1' " + String(nightSoundMute ? "checked" : "") + "><span class='slider'></span></label></div>";
+  s += "<button type='submit' name='a' value='play_test' class='btn-p' style='margin-top:10px; margin-bottom:15px;'>🎵 ТЕСТ ЗВУКА</button>";
+  s += "<div class='row'><span>Таймер (мин):</span><input type='number' name='tm' value='" + String(timerMinutesInput) + "' style='width:70px'></div>";
+  if (timerActive || timerAlert) s += "<button type='submit' name='a' value='t_stop' class='btn-d'>⏹ ОСТАНОВИТЬ ТАЙМЕР</button>";
+  else s += "<button type='submit' name='a' value='t_start' class='btn-s'>▶ ЗАПУСТИТЬ ТАЙМЕР</button>";
+  s += "</div>";
+
+  s += "<div class='card'><h3>📜 Текст и Telegram</h3>";
+  s += "<div class='row'><span>Токен бота:</span><input type='text' name='tgt' value='" + tgToken + "' style='width:70%'></div>";
+  s += "<input type='text' name='msg' value='" + currentText + "'>";
+  s += "<div class='row'><span>Цвет:</span> <input type='color' name='tc' value='" + textColorHex + "'> <span>Шрифт:</span> <select name='ts' style='width:auto'><option value='1' " + String(isLargeText ? "selected" : "") + ">Крупный</option><option value='0' " + String(!isLargeText ? "selected" : "") + ">Обычный</option></select></div>";
+  s += "<span>Скорость прокрутки:</span><input type='range' name='sp' min='10' max='65' value='" + String(75 - scrollSpeed) + "'>";
+  s += "<div class='grid'><button type='submit' name='a' value='once' class='btn-w'>1 раз</button><button type='submit' name='a' value='loop' class='btn-s'>Цикл</button></div>";
+  s += "<button type='submit' name='a' value='stop' class='btn-d'>⏹ Выключить текст</button></div>";
+
+  s += "<div class='card'><h3>⚙️ Настройки и Даты</h3>";
+  s += "<span style='font-size:12px; color:#aaa;'>Формат: Имя ДД.ММ, Имя ДД.ММ</span>";
+  s += "<div class='row'><span>Дни рожд.:</span><input type='text' name='bdays' value='" + birthdayList + "' placeholder='Иван 15.05, Анна 02.11' style='width:70%'></div>";
+  s += "<hr style='border:none;border-top:1px solid #333;margin:8px 0'>";
+  s += "<div class='row'><span>Событие:</span><input type='text' name='cname' value='" + countdownEventName + "' style='width:60%'></div>";
+  s += "<div class='row'><span>Дата:</span><input type='date' name='cdate' value='" + countdownTargetDate + "' style='width:60%'></div>";
+  s += "<hr style='border:none;border-top:1px solid #333;margin:8px 0'>";
+  s += "<div class='grid'><div class='row'><span>Lat:</span><input type='text' name='lat' value='" + weatherLat + "' style='width:60px'></div><div class='row'><span>Lon:</span><input type='text' name='lon' value='" + weatherLon + "' style='width:60px'></div></div>";
+  s += "<div class='grid'><div class='row'><span>Часы:</span><input type='color' name='cc' value='" + clockColorHex + "'></div><div class='row'><span>Дата:</span><input type='color' name='dc' value='" + dateColorHex + "'></div></div>";
+  s += "<span>Яркость матрицы:</span><input type='range' name='br' min='1' max='255' value='" + String(currentBrightness) + "'>";
+  s += "</div>";
+  s += "<button type='submit' name='a' value='reboot' class='btn-d' style='margin-bottom:30px;opacity:0.8'>🔄 ПЕРЕЗАГРУЗИТЬ ESP32</button>";
+  s += "</form></body></html>";
+  server.send(200, "text/html", s);
+}
+
+void handleUpdate() {
+  if (server.hasArg("vol")) {
+    int newVol = server.arg("vol").toInt();
+    if (newVol != currentVolume) {
+      currentVolume = newVol;
+      myDFPlayer.volume(currentVolume);
+      delay(40);
+    }
+  }
+  if (server.hasArg("msg")) {
+    currentText = server.arg("msg");
+    currentScrollSource = SRC_TELEGRAM;
+  }
+  if (server.hasArg("bdays")) { birthdayList = server.arg("bdays"); }
+  if (server.hasArg("ts")) isLargeText = server.arg("ts") == "1";
+  if (server.hasArg("sp")) scrollSpeed = 75 - server.arg("sp").toInt();
+  if (server.hasArg("nsp")) newsScrollSpeed = 75 - server.arg("nsp").toInt();
+  if (server.hasArg("at")) animType = server.arg("at").toInt();
+  if (server.hasArg("tc")) {
+    textColorHex = server.arg("tc");
+    textColor = hexToRGB565(textColorHex);
+  }
+  if (server.hasArg("cc")) {
+    clockColorHex = server.arg("cc");
+    clockColor = hexToRGB565(clockColorHex);
+  }
+  if (server.hasArg("dc")) {
+    dateColorHex = server.arg("dc");
+    dateColor = hexToRGB565(dateColorHex);
+  }
+  if (server.hasArg("br")) currentBrightness = server.arg("br").toInt();
+  if (server.hasArg("cdate")) countdownTargetDate = server.arg("cdate");
+  if (server.hasArg("tgt")) tgToken = server.arg("tgt");
+  if (server.hasArg("cname")) countdownEventName = server.arg("cname");
+  if (server.hasArg("eff")) currentEffectIdx = server.arg("eff").toInt();
+  if (server.hasArg("lat")) weatherLat = server.arg("lat");
+  if (server.hasArg("lon")) weatherLon = server.arg("lon");
+  if (server.hasArg("nim")) newsIntervalMins = server.arg("nim").toInt();
+  if (server.hasArg("jim")) jokeIntervalMins = server.arg("jim").toInt();
+  if (server.hasArg("nsh")) nightStartHour = server.arg("nsh").toInt();
+  if (server.hasArg("neh")) nightEndHour = server.arg("neh").toInt();
+  nightEyesEnable = server.hasArg("nee");
+  if (server.hasArg("eyet")) eyeType = server.arg("eyet").toInt();
+  if (server.hasArg("eyec")) eyeColorHex = server.arg("eyec");
+
+  forceNightMode = server.hasArg("fnm");
+
+  showClockFlag = server.hasArg("scl");
+  showWeatherFlag = server.hasArg("sw");
+  showCurrencyFlag = server.hasArg("scu");
+  showExtWeatherFlag = server.hasArg("sew");
+  showCountdownFlag = server.hasArg("sco");
+  showSunFlag = server.hasArg("ssun");
+  showNewsFlag = server.hasArg("snews");
+  showGraphFlag = server.hasArg("sgr");
+  showJokeFlag = server.hasArg("sjoke");
+  nightSoundMute = server.hasArg("nsm");
+  nightModeAuto = server.hasArg("nm");
+  showTerminatorFlag = server.hasArg("sterm");
+  showCarDashFlag = server.hasArg("scar");
+  showBttfFlag = server.hasArg("sbttf");
+  showPipBoyFlag = server.hasArg("spip");
+  showPredatorFlag = server.hasArg("spred");
+  showMatrixFlag = server.hasArg("smatr");
+  showSauronFlag = server.hasArg("ssaur");
+  showCyberFlag = server.hasArg("scyb");
+  showSpaceFlag = server.hasArg("sspc");
+  showPongFlag = server.hasArg("spng");
+  showF16Flag = server.hasArg("sf16");
+
+  clockShowSec = server.arg("tcl").toInt();
+  weatherShowSec = server.arg("tw").toInt();
+  currencyShowSec = server.arg("tcu").toInt();
+  extWeatherShowSec = server.arg("tew").toInt();
+  countdownShowSec = server.arg("tco").toInt();
+  graphShowSec = server.arg("tgr").toInt();
+  sunShowSec = server.arg("tsun").toInt();
+  terminatorShowSec = server.arg("tterm").toInt();
+  carDashShowSec = server.arg("tcar").toInt();
+  bttfShowSec = server.arg("tbttf").toInt();
+  pipBoyShowSec = server.arg("tpip").toInt();
+  predatorShowSec = server.arg("tpred").toInt();
+  matrixShowSec = server.arg("tmatr").toInt();
+  sauronShowSec = server.arg("tsaur").toInt();
+  cyberShowSec = server.arg("tcyb").toInt();
+  spaceShowSec = server.arg("tspc").toInt();
+  pongShowSec = server.arg("tpng").toInt();
+  f16ShowSec = server.arg("tf16").toInt();
+
+  saveSettings();
+  buildScreenSequence();
+  calculateCountdown();
+  checkBirthdays();
+  updateTextWidth();
+
+  String a = server.arg("a");
+  if (a == "reboot") {
+    server.send(200, "text/html", "<meta charset='UTF-8'><h2>Перезагрузка...</h2><script>setTimeout(()=>location.href='/',5000)</script>");
+    delay(500);
+    ESP.restart();
+    return;
+  } else if (a == "once") {
+    currentScrollMode = SCROLL_ONCE;
+    scrollX = PANEL_RES_X;
+    currentScrollSource = SRC_TELEGRAM;
+    myDFPlayer.volume(currentVolume);
+    delay(50);
+    myDFPlayer.playFolder(1, 25);
+  } else if (a == "loop") {
+    currentScrollMode = SCROLL_LOOP;
+    scrollX = PANEL_RES_X;
+    currentScrollSource = SRC_TELEGRAM;
+    myDFPlayer.volume(currentVolume);
+    delay(50);
+    myDFPlayer.playFolder(1, 25);
+  } else if (a == "stop") {
+    currentScrollMode = SCROLL_NONE;
+  } else if (a == "t_start") {
+    timerMinutesInput = server.arg("tm").toInt();
+    timerEndTime = millis() + (timerMinutesInput * 60000);
+    timerActive = true;
+    timerAlert = false;
+  } else if (a == "t_stop") {
+    timerActive = false;
+    timerAlert = false;
+  } else if (a == "play_test") {
+    myDFPlayer.volume(currentVolume);
+    delay(50);
+    myDFPlayer.playFolder(1, 25);
+  }
+
+  if (server.hasArg("ajax")) {
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.sendHeader("Location", "/");
+    server.send(303);
+  }
+}
+
+void drawWiFiIcon(int x, int y) {
+  uint16_t color = (WiFi.RSSI() < -75) ? getColor(255, 0, 0) : getColor(0, 255, 0);
+  int step = (millis() / 300) % 4;
+  matrix.drawPixel(x + 2, y + 4, color);
+  if (step > 0) matrix.drawLine(x + 1, y + 3, x + 3, y + 3, color);
+  if (step > 1) matrix.drawLine(x, y + 2, x + 4, y + 2, color);
+}
+
+void drawAnimatedWeather(int cx, int cy, String code) {
+  unsigned long t = millis();
+  uint16_t cYellow = getColor(255, 200, 0), cWhite = getColor(255, 255, 255), cLightGray = getColor(180, 180, 180);
+  uint16_t cBlue = getColor(50, 150, 255), cGray = getColor(100, 100, 100), cBlack = getColor(0, 0, 0);
+
+  if (code == "01d") {
+    matrix.fillCircle(cx, cy, 11, cYellow);
+    for (int i = 0; i < 8; i++) {
+      float angle = (t / 800.0) + (i * PI / 4.0);
+      matrix.drawLine(cx + cos(angle) * 14, cy + sin(angle) * 14, cx + cos(angle) * 20, cy + sin(angle) * 20, cYellow);
+    }
+  } else if (code == "01n") {
+    matrix.fillCircle(cx, cy, 12, cYellow);
+    matrix.fillCircle(cx - 4, cy - 4, 10, cBlack);
+  } else if (code.indexOf("02") != -1 || code.indexOf("03") != -1 || code.indexOf("04") != -1 || code.indexOf("50") != -1) {
+    int dy = sin(t / 400.0) * 3;
+    if (code == "02d") { matrix.fillCircle(cx + 8, cy - 6 + dy, 9, cYellow); }
+    if (code == "02n") {
+      matrix.fillCircle(cx + 8, cy - 6 + dy, 9, cYellow);
+      matrix.fillCircle(cx + 4, cy - 10 + dy, 7, cBlack);
+    }
+    matrix.fillCircle(cx - 7, cy + 7 + dy, 9, cLightGray);
+    matrix.fillCircle(cx + 7, cy + 1 + dy, 12, cLightGray);
+    matrix.fillCircle(cx + 17, cy + 7 + dy, 9, cLightGray);
+    matrix.fillRect(cx - 7, cy + 1 + dy, 24, 16, cLightGray);
+    matrix.fillCircle(cx - 5, cy + 5 + dy, 9, cWhite);
+    matrix.fillCircle(cx + 5, cy - 1 + dy, 12, cWhite);
+    matrix.fillCircle(cx + 15, cy + 5 + dy, 9, cWhite);
+    matrix.fillRect(cx - 5, cy - 1 + dy, 20, 16, cWhite);
+  } else if (code.indexOf("09") != -1 || code.indexOf("10") != -1) {
+    matrix.fillCircle(cx - 5, cy + 1, 9, cGray);
+    matrix.fillCircle(cx + 5, cy - 5, 12, cGray);
+    matrix.fillCircle(cx + 15, cy + 1, 9, cGray);
+    matrix.fillRect(cx - 5, cy - 5, 20, 16, cGray);
+    for (int i = 0; i < 4; i++) {
+      int dropY = ((t / (20 + i * 5)) + i * 12) % 20;
+      int dropX = cx - 8 + i * 8;
+      matrix.drawLine(dropX, cy + 10 + dropY, dropX - 2, cy + 14 + dropY, cBlue);
+    }
+  } else if (code.indexOf("13") != -1) {
+    matrix.fillCircle(cx - 5, cy + 1, 9, cWhite);
+    matrix.fillCircle(cx + 5, cy - 5, 12, cWhite);
+    matrix.fillCircle(cx + 15, cy + 1, 9, cWhite);
+    matrix.fillRect(cx - 5, cy - 5, 20, 16, cWhite);
+    for (int i = 0; i < 4; i++) {
+      int snowY = ((t / (40 + i * 10)) + i * 10) % 20;
+      int snowX = cx - 8 + i * 8 + sin((t / 300.0) + i) * 4;
+      matrix.drawPixel(snowX, cy + 10 + snowY, cWhite);
+      matrix.drawPixel(snowX + 1, cy + 10 + snowY, cWhite);
+    }
+  } else if (code.indexOf("11") != -1) {
+    matrix.fillCircle(cx - 5, cy + 1, 9, cGray);
+    matrix.fillCircle(cx + 5, cy - 5, 12, cGray);
+    matrix.fillCircle(cx + 15, cy + 1, 9, cGray);
+    matrix.fillRect(cx - 5, cy - 5, 20, 16, cGray);
+    if ((t % 1500) < 200) {
+      matrix.drawLine(cx + 5, cy + 7, cx, cy + 16, cYellow);
+      matrix.drawLine(cx, cy + 16, cx + 8, cy + 16, cYellow);
+      matrix.drawLine(cx + 8, cy + 16, cx + 2, cy + 28, cYellow);
+      if ((t % 1500) < 50) matrix.fillCircle(cx + 5, cy - 5, 10, cWhite);
+    }
+  }
+}
+
+void drawBTTFRow(int ox, int y, uint16_t color, String title, String mon, int day, int year, int h, int m, bool isPresent) {
+  uint16_t titleColor = getColor(255, 255, 255);
+  u8g2_fonts.setFont(u8g2_font_5x7_tr);
+  u8g2_fonts.setForegroundColor(titleColor);
+  int tw = u8g2_fonts.getUTF8Width(title.c_str());
+  matrix.fillRect(ox + (PANEL_RES_X - tw) / 2 - 2, y - 11, tw + 4, 9, getColor(100, 0, 0));
+  u8g2_fonts.setCursor(ox + (PANEL_RES_X - tw) / 2, y - 3);
+  u8g2_fonts.print(title);
+  u8g2_fonts.setFont(u8g2_font_helvB12_te);
+  u8g2_fonts.setForegroundColor(color);
+  int vy = y + 10;
+  u8g2_fonts.setCursor(ox + 16, vy);
+  u8g2_fonts.print(mon);
+  u8g2_fonts.setCursor(ox + 72, vy);
+  u8g2_fonts.printf("%02d", day);
+  u8g2_fonts.setCursor(ox + 114, vy);
+  u8g2_fonts.printf("%04d", year);
+  u8g2_fonts.setCursor(ox + 182, vy);
+  u8g2_fonts.printf("%02d", h);
+  u8g2_fonts.setCursor(ox + 224, vy);
+  u8g2_fonts.printf("%02d", m);
+  if (!isPresent || (millis() / 500) % 2 == 0) {
+    matrix.fillCircle(ox + 214, vy - 9, 1, color);
+    matrix.fillCircle(ox + 214, vy - 3, 1, color);
+  }
+}
+
+void drawScreen(int type, int ox, int oy, struct tm *tm_info, bool ok) {
+  if (type == 0) {
+    if (!ok) return;
+    char tStr[16];
+    strftime(tStr, sizeof(tStr), "%H:%M:%S", tm_info);
+    String d = String(tm_info->tm_mday) + " " + String(monthsRu[tm_info->tm_mon]) + " " + String(tm_info->tm_year + 1900) + " г.";
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+    u8g2_fonts.setForegroundColor(clockColor);
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - u8g2_fonts.getUTF8Width(tStr)) / 2, oy + 32);
+    u8g2_fonts.print(tStr);
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    drawWiFiIcon(ox + PANEL_RES_X - 10, oy + 2);
+    if (hasBirthdayTomorrow) {
+      int hX = ox + 10, hY = oy + 55;
+      if ((millis() / 500) % 2 == 0) {
+        matrix.fillRect(hX - 4, hY - 2, 8, 5, getColor(255, 100, 200));
+        matrix.drawPixel(hX, hY - 4, getColor(255, 255, 0));
+      }
+      u8g2_fonts.setForegroundColor(getColor(255, 100, 200));
+      String fullText = "Завтра День рождение: " + tomorrowBirthdaysNames + " ";
+      int fullWidth = u8g2_fonts.getUTF8Width(fullText.c_str());
+      if (fullWidth > (PANEL_RES_X - 20)) {
+        bdayNameScrollX--;
+        if (bdayNameScrollX < -fullWidth) bdayNameScrollX = PANEL_RES_X;
+        u8g2_fonts.setCursor(ox + bdayNameScrollX, oy + 47);
+      } else {
+        u8g2_fonts.setCursor(ox + (PANEL_RES_X - fullWidth) / 2, oy + 47);
+      }
+      u8g2_fonts.print(fullText);
+    } else {
+      u8g2_fonts.setForegroundColor(dateColor);
+      String day = daysOfWeek[tm_info->tm_wday];
+      u8g2_fonts.setCursor(ox + (PANEL_RES_X - u8g2_fonts.getUTF8Width(day.c_str())) / 2, oy + 47);
+      u8g2_fonts.print(day);
+      int m = tm_info->tm_mon + 1;
+      int d_mday = tm_info->tm_mday;
+      int hX = ox + 35, hY = oy + 55;
+      if ((m == 12 && d_mday >= 31) || (m == 1 && d_mday <= 3)) {
+        matrix.fillTriangle(hX, hY - 8, hX - 4, hY, hX + 4, hY, getColor(0, 200, 0));
+        matrix.fillTriangle(hX, hY - 4, hX - 5, hY + 4, hX + 5, hY + 4, getColor(0, 200, 0));
+        matrix.fillRect(hX - 1, hY + 4, 3, 3, getColor(150, 75, 0));
+      } else if (m == 2 && d_mday == 23) {
+        matrix.fillTriangle(hX, hY - 8, hX - 4, hY + 2, hX + 4, hY + 2, getColor(255, 0, 0));
+        matrix.fillTriangle(hX - 5, hY - 3, hX + 5, hY - 3, hX, hY + 4, getColor(255, 0, 0));
+      } else if (m == 3 && d_mday == 8) {
+        matrix.drawCircle(hX, hY - 5, 3, getColor(255, 100, 200));
+        matrix.drawCircle(hX, hY + 1, 4, getColor(255, 100, 200));
+      } else if (m == 5 && d_mday == 9) {
+        matrix.drawLine(hX - 4, hY - 4, hX + 4, hY - 4, getColor(255, 100, 0));
+        matrix.drawLine(hX - 4, hY - 2, hX + 4, hY - 2, getColor(0, 0, 0));
+        matrix.drawLine(hX - 4, hY, hX + 4, hY, getColor(255, 100, 0));
+      }
+    }
+    u8g2_fonts.setForegroundColor(dateColor);
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - u8g2_fonts.getUTF8Width(d.c_str())) / 2, oy + 61);
+    u8g2_fonts.print(d);
+  } else if (type == 9) {
+    String bmpName = "/bday" + String(currentBdayImage) + ".bmp";
+    drawBmp(bmpName.c_str(), ox + (PANEL_RES_X / 2 - 64), oy);
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+    u8g2_fonts.setCursor(ox + 5, oy + 60);
+    u8g2_fonts.print("С днем рождения!");
+  } else if (type == 1) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(0, 255, 255));
+    int cityW = u8g2_fonts.getUTF8Width(currentCity.c_str());
+    int rightBound = PANEL_RES_X - 10;
+    u8g2_fonts.setCursor(ox + rightBound - cityW, oy + 12);
+    u8g2_fonts.print(currentCity);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 0));
+    int descW = u8g2_fonts.getUTF8Width(currentWeatherDesc.c_str());
+    if (descW > 120) {
+      int offset = (millis() / 30) % (descW + 120);
+      u8g2_fonts.setCursor(ox + rightBound - offset, oy + 26);
+    } else {
+      u8g2_fonts.setCursor(ox + rightBound - descW, oy + 26);
+    }
+    u8g2_fonts.print(currentWeatherDesc);
+    u8g2_fonts.setFont(u8g2_font_logisoso32_tn);
+    u8g2_fonts.setForegroundColor(getColor(255, 100, 0));
+    String tStr = currentTemp + "C";
+    int tempW = u8g2_fonts.getUTF8Width(tStr.c_str());
+    u8g2_fonts.setCursor(ox + rightBound - tempW, oy + 60);
+    u8g2_fonts.print(tStr);
+    drawAnimatedWeather(ox + 55, oy + 25, weatherIconCode);
+  } else if (type == 2) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(0, 255, 255));
+    String title = "Прогноз погоды";
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - u8g2_fonts.getUTF8Width(title.c_str())) / 2, oy + 14);
+    u8g2_fonts.print(title);
+    matrix.drawLine(ox + 10, oy + 18, ox + PANEL_RES_X - 10, oy + 18, getColor(0, 150, 150));
+    drawAnimatedWeather(ox + (PANEL_RES_X / 4) - 30, oy + 20, weatherIconCode);
+    int textX = ox + (PANEL_RES_X / 2) - 15;
+    u8g2_fonts.setCursor(textX, oy + 32);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+    u8g2_fonts.print("Ощущается: ");
+    u8g2_fonts.setForegroundColor(getColor(50, 150, 255));
+    u8g2_fonts.print(currentFeelsLike + "C");
+    u8g2_fonts.setCursor(textX, oy + 46);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+    u8g2_fonts.print("Влажность: ");
+    u8g2_fonts.setForegroundColor(getColor(50, 150, 255));
+    u8g2_fonts.print(currentHumidity + "%");
+    u8g2_fonts.setCursor(textX, oy + 60);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+    u8g2_fonts.print("Ветер: ");
+    u8g2_fonts.setForegroundColor(getColor(50, 150, 255));
+    u8g2_fonts.print(currentWind + " м/с");
+  } else if (type == 3) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+    String title = "КУРСЫ ВАЛЮТ:";
+    int titleW = u8g2_fonts.getUTF8Width(title.c_str());
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X / 2 - titleW / 2) - 60, oy + 15);
+    u8g2_fonts.print(title);
+    u8g2_fonts.setCursor(ox + 30, oy + 38);
+    u8g2_fonts.print("USD: " + currentUsdRate + " руб");
+    u8g2_fonts.setCursor(ox + 30, oy + 60);
+    u8g2_fonts.print("EUR: " + currentEurRate + " руб");
+    int cx = ox + (PANEL_RES_X / 2) + 60, cy = oy + 31;
+    float phase = millis() / 400.0;
+    float scaleX = cos(phase);
+    int r = 24;
+    uint16_t gold = getColor(255, 255, 0), edgeColor = getColor(200, 150, 0), symbolColor = getColor(0, 0, 0);
+    for (int y = -r; y <= r; y++) {
+      int w = sqrt(r * r - y * y);
+      int px = w * scaleX;
+      if (sin(phase) > 0) matrix.drawLine(cx - px - 4, cy + y, cx - px, cy + y, edgeColor);
+      else matrix.drawLine(cx + px, cy + y, cx + px + 4, cy + y, edgeColor);
+      matrix.drawLine(cx - px, cy + y, cx + px, cy + y, gold);
+    }
+    int sX = 10 * scaleX;
+    matrix.drawLine(cx, cy - 16, cx, cy + 16, symbolColor);
+    matrix.drawLine(cx - 1, cy - 16, cx - 1, cy + 16, symbolColor);
+    matrix.drawLine(cx + sX, cy - 10, cx - sX, cy - 10, symbolColor);
+    matrix.drawLine(cx - sX, cy - 10, cx - sX, cy - 2, symbolColor);
+    matrix.drawLine(cx - sX, cy - 2, cx + sX, cy + 2, symbolColor);
+    matrix.drawLine(cx + sX, cy + 2, cx + sX, cy + 10, symbolColor);
+    matrix.drawLine(cx + sX, cy + 10, cx - sX, cy + 10, symbolColor);
+  } else if (type == 4) {
+    unsigned long t = millis();
+    int cx1 = ox + 32, cy1 = oy + 32, cx2 = ox + PANEL_RES_X - 32;
+    uint16_t c1 = getColor(0, 255, 255), c2 = getColor(255, 0, 255);
+    for (int j = 0; j < 6; j++) {
+      float a1 = (t / 600.0) + (j * 3.1415 / 3);
+      matrix.fillCircle(cx1 + cos(a1) * 24, cy1 + sin(a1) * 24, 2, c1);
+      float a2 = -(t / 500.0) + (j * 3.1415 / 3);
+      matrix.fillCircle(cx2 + cos(a2) * 24, cy1 + sin(a2) * 24, 2, c2);
+    }
+    uint8_t pulseBr = 100 + sin(t / 300.0) * 50;
+    matrix.drawRoundRect(ox + 2, oy + 2, PANEL_RES_X - 4, PANEL_RES_Y - 4, 6, getColor(0, 0, pulseBr));
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 0));
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - u8g2_fonts.getUTF8Width(countdownEventName.c_str())) / 2, oy + 18);
+    u8g2_fonts.print(countdownEventName);
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+    uint8_t redVal = 200 + sin(t / 200.0) * 55;
+    u8g2_fonts.setForegroundColor(getColor(redVal, 50, 50));
+    String ds = String(daysRemaining);
+    int dw = u8g2_fonts.getUTF8Width(ds.c_str());
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - dw) / 2, oy + 48);
+    u8g2_fonts.print(ds);
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(200, 200, 200));
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X / 2 + dw / 2 + 8), oy + 46);
+    u8g2_fonts.print("дней");
+  } else if (type == 5) {
+    if (!forecastLoaded) return;
+    matrix.drawLine(ox + 128, oy + 5, ox + 128, oy + 59, getColor(50, 50, 50));
+    int max_k = (millis() - lastSwitchTime) / 250;
+    if (isAnimating) max_k = 5;
+    if (max_k > 5) max_k = 5;
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(0, 255, 255));
+    String tTitle = "Температура";
+    u8g2_fonts.setCursor(ox + (128 - u8g2_fonts.getUTF8Width(tTitle.c_str())) / 2, oy + 12);
+    u8g2_fonts.print(tTitle);
+    int minT = forecastTemps[0], maxT = minT;
+    for (int k = 0; k < 6; k++) {
+      if (forecastTemps[k] < minT) minT = forecastTemps[k];
+      if (forecastTemps[k] > maxT) maxT = forecastTemps[k];
+    }
+    if (minT == maxT) {
+      minT--;
+      maxT++;
+    }
+    int stepXT = (128 - 20) / 5;
+    for (int k = 0; k < 5; k++) {
+      int x1 = ox + 10 + (k * stepXT), v1 = forecastTemps[k], y1 = oy + 54 - ((v1 - minT) * 25 / (maxT - minT));
+      int x2 = ox + 10 + ((k + 1) * stepXT), v2 = forecastTemps[k + 1], y2 = oy + 54 - ((v2 - minT) * 25 / (maxT - minT));
+      if (k < max_k) {
+        matrix.drawLine(x1, y1, x2, y2, getColor(255, 120, 0));
+        matrix.drawLine(x1, y1 + 1, x2, y2 + 1, getColor(255, 120, 0));
+      }
+      if (k <= max_k) {
+        matrix.fillCircle(x1, y1, 2, getColor(255, 255, 0));
+        String sStr = String(v1);
+        u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+        u8g2_fonts.setCursor(x1 - (u8g2_fonts.getUTF8Width(sStr.c_str()) / 2), y1 - 6);
+        u8g2_fonts.print(sStr);
+      }
+      if (k == 4 && max_k == 5) {
+        matrix.fillCircle(x2, y2, 2, getColor(255, 255, 0));
+        String sStr = String(v2);
+        u8g2_fonts.setCursor(x2 - (u8g2_fonts.getUTF8Width(sStr.c_str()) / 2), y2 - 6);
+        u8g2_fonts.print(sStr);
+      }
+    }
+    u8g2_fonts.setForegroundColor(getColor(255, 100, 255));
+    String pTitle = "Давление";
+    u8g2_fonts.setCursor(ox + 128 + (128 - u8g2_fonts.getUTF8Width(pTitle.c_str())) / 2, oy + 12);
+    u8g2_fonts.print(pTitle);
+    int minP = forecastPress[0], maxP = minP;
+    for (int k = 0; k < 6; k++) {
+      if (forecastPress[k] < minP) minP = forecastPress[k];
+      if (forecastPress[k] > maxP) maxP = forecastPress[k];
+    }
+    if (minP == maxP) {
+      minP--;
+      maxP++;
+    }
+    for (int k = 0; k < 5; k++) {
+      int x1 = ox + 128 + 10 + (k * stepXT), v1 = forecastPress[k], y1 = oy + 54 - ((v1 - minP) * 25 / (maxP - minP));
+      int x2 = ox + 128 + 10 + ((k + 1) * stepXT), v2 = forecastPress[k + 1], y2 = oy + 54 - ((v2 - minP) * 25 / (maxP - minP));
+      if (k < max_k) {
+        matrix.drawLine(x1, y1, x2, y2, getColor(150, 50, 255));
+        matrix.drawLine(x1, y1 + 1, x2, y2 + 1, getColor(150, 50, 255));
+      }
+      if (k <= max_k) {
+        matrix.fillCircle(x1, y1, 2, getColor(255, 255, 255));
+        String sStr = String(v1);
+        u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+        u8g2_fonts.setCursor(x1 - (u8g2_fonts.getUTF8Width(sStr.c_str()) / 2), y1 - 6);
+        u8g2_fonts.print(sStr);
+      }
+      if (k == 4 && max_k == 5) {
+        matrix.fillCircle(x2, y2, 2, getColor(255, 255, 255));
+        String sStr = String(v2);
+        u8g2_fonts.setCursor(x2 - (u8g2_fonts.getUTF8Width(sStr.c_str()) / 2), y2 - 6);
+        u8g2_fonts.print(sStr);
+      }
+    }
+  } else if (type == 6) {
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(255, 200, 0));
+    String title = "Восход - Закат";
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - u8g2_fonts.getUTF8Width(title.c_str())) / 2, oy + 12);
+    u8g2_fonts.print(title);
+    bool isNight = false;
+    if (globalTimeOk && sunriseTime.length() >= 5 && sunsetTime.length() >= 5) {
+      int sr_m = sunriseTime.substring(0, 2).toInt() * 60 + sunriseTime.substring(3, 5).toInt();
+      int ss_m = sunsetTime.substring(0, 2).toInt() * 60 + sunsetTime.substring(3, 5).toInt();
+      int cur_m = globalTimeInfo.tm_hour * 60 + globalTimeInfo.tm_min;
+      if (cur_m < sr_m || cur_m > ss_m) isNight = true;
+    }
+    unsigned long t = millis();
+    int sunX = ox + (PANEL_RES_X / 2), sunY = oy + 32;
+    if (isNight) {
+      uint16_t moonColor = getColor(255, 255, 0);
+      matrix.fillCircle(sunX, sunY, 18, moonColor);
+      matrix.fillCircle(sunX + 6, sunY - 4, 15, 0);
+      randomSeed(globalTimeInfo.tm_min);
+      for (int s = 0; s < 15; s++) {
+        int sx = sunX + random(-45, 45), sy = sunY + random(-20, 20);
+        if (abs(sx - sunX) > 20 || abs(sy - sunY) > 20) {
+          if (random(0, 10) > 5) matrix.drawPixel(sx, sy, getColor(255, 255, 255));
+        }
+      }
+      randomSeed(millis());
+    } else {
+      uint16_t sunColor = getColor(255, 200, 0), coreColor = getColor(255, 150, 0);
+      for (int j = 0; j < 12; j++) {
+        float angle = (t / 800.0) + (j * 3.14159 * 2.0 / 12.0);
+        int x1 = sunX + cos(angle) * 20, y1 = sunY + sin(angle) * 20;
+        int x2 = sunX + cos(angle) * 28, y2 = sunY + sin(angle) * 28;
+        matrix.drawLine(x1, y1, x2, y2, sunColor);
+      }
+      float pulse = sin(t / 400.0);
+      int coreR = 13 + (pulse * 2.0);
+      matrix.fillCircle(sunX, sunY, 18, sunColor);
+      matrix.fillCircle(sunX, sunY, coreR, coreColor);
+    }
+    u8g2_fonts.setForegroundColor(getColor(0, 255, 255));
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X / 4) - 20, oy + 60);
+    u8g2_fonts.print(sunriseTime);
+    u8g2_fonts.setForegroundColor(getColor(255, 100, 0));
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X / 4 * 3) - 10, oy + 60);
+    u8g2_fonts.print(sunsetTime);
+  } else if (type == 8) {
+    if (!ok) return;
+    int h = globalTimeInfo.tm_hour;
+    int m = globalTimeInfo.tm_min;
+    int cx1 = ox + 64, cy1 = oy + 32, cx2 = ox + 192, cy2 = oy + 32, r = 31;
+    for (int j = 140; j <= 400; j += 10) {
+      float a = j * PI / 180.0;
+      matrix.drawPixel(cx1 + cos(a) * r, cy1 + sin(a) * r, getColor(100, 100, 100));
+      matrix.drawPixel(cx2 + cos(a) * r, cy2 + sin(a) * r, getColor(100, 100, 100));
+    }
+    for (int j = 140; j <= 400; j += 26) {
+      float a = j * PI / 180.0;
+      matrix.drawLine(cx1 + cos(a) * (r - 4), cy1 + sin(a) * (r - 4), cx1 + cos(a) * r, cy1 + sin(a) * r, getColor(255, 255, 255));
+      matrix.drawLine(cx2 + cos(a) * (r - 4), cy2 + sin(a) * (r - 4), cx2 + cos(a) * r, cy2 + sin(a) * r, getColor(255, 255, 255));
+    }
+    u8g2_fonts.setFont(u8g2_font_logisoso16_tn);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+    String hStr = String(h), mStr = String(m);
+    if (m < 10) mStr = "0" + mStr;
+    int hw = u8g2_fonts.getUTF8Width(hStr.c_str()), mw = u8g2_fonts.getUTF8Width(mStr.c_str());
+
+    u8g2_fonts.setCursor(cx1 - (hw / 2) - 14, cy1 + 6);
+    u8g2_fonts.print(hStr);
+    u8g2_fonts.setCursor(cx2 - (mw / 2) + 14, cy2 + 6);
+    u8g2_fonts.print(mStr);
+
+    float angleH = map(h % 12 * 60 + m, 0, 12 * 60, 140, 400) * PI / 180.0;
+    float angleM = map(m, 0, 60, 140, 400) * PI / 180.0;
+    matrix.drawLine(cx1, cy1, cx1 + cos(angleH) * (r - 6), cy1 + sin(angleH) * (r - 6), getColor(255, 50, 0));
+    matrix.drawLine(cx2, cy2, cx2 + cos(angleM) * (r - 6), cy2 + sin(angleM) * (r - 6), getColor(255, 50, 0));
+    matrix.fillCircle(cx1, cy1, 3, getColor(50, 50, 50));
+    matrix.fillCircle(cx2, cy2, 3, getColor(50, 50, 50));
+
+    u8g2_fonts.setFont(u8g2_font_5x7_tr);
+    u8g2_fonts.setForegroundColor(getColor(200, 100, 0));
+    u8g2_fonts.setCursor(cx1 - 10, cy1 + 25);
+    u8g2_fonts.print("HOUR");
+    u8g2_fonts.setCursor(cx2 - 8, cy2 + 25);
+    u8g2_fonts.print("MIN");
+  } else if (type == 10) {
+    unsigned long ms = millis();
+    uint16_t termRed = getColor(255, 0, 0), termDimRed = getColor(180, 0, 0), termDarkRed = getColor(100, 0, 0);
+    int cx = ox + 64, cy = oy + 32;
+    float zoom = 1.0 + 0.15 * sin(ms / 400.0);
+    matrix.drawCircle(cx, cy, 26 * zoom, termDarkRed);
+    matrix.drawCircle(cx, cy, 25 * zoom, termDarkRed);
+    matrix.drawCircle(cx, cy, 18 * zoom, termRed);
+    matrix.drawCircle(cx, cy, 10 * zoom, termRed);
+    matrix.fillCircle(cx, cy, 5 * zoom, termRed);
+    matrix.drawLine(cx - 30, cy, cx - 12, cy, termDarkRed);
+    matrix.drawLine(cx + 12, cy, cx + 30, cy, termDarkRed);
+    matrix.drawLine(cx, cy - 30, cx, cy - 12, termDarkRed);
+    matrix.drawLine(cx, cy + 12, cx, cy + 30, termDarkRed);
+    u8g2_fonts.setFont(u8g2_font_5x7_tr);
+    for (int j = 0; j < TERM_LINES; j++) {
+      if (termLog[j].length() > 0) {
+        if (j <= 2) u8g2_fonts.setForegroundColor(termRed);
+        else if (j <= 5) u8g2_fonts.setForegroundColor(termDimRed);
+        else u8g2_fonts.setForegroundColor(termDarkRed);
+        int yPos = (j * 9) + (int)termScrollY + 7;
+        if (yPos > 6 && yPos <= 74) {
+          u8g2_fonts.setCursor(ox + 140, oy + yPos);
+          u8g2_fonts.print(termLog[j]);
+        }
+      }
+    }
+    int scanY = (ms / 25) % PANEL_RES_Y;
+    matrix.drawLine(ox, oy + scanY, ox + PANEL_RES_X, oy + scanY, termRed);
+    matrix.drawLine(ox, oy + scanY - 1, ox + PANEL_RES_X, oy + scanY - 1, termDarkRed);
+  } else if (type == 11) {
+    if (!ok) return;
+    const char *bM[] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+    int dYr = 2015, dMo = 10, dDy = 21;
+    sscanf(countdownTargetDate.c_str(), "%d-%d-%d", &dYr, &dMo, &dDy);
+    if (dMo >= 1 && dMo <= 12) { drawBTTFRow(ox, 11, getColor(255, 0, 0), "DESTINATION TIME", bM[dMo - 1], dDy, dYr, 0, 0, false); }
+    int pYr = globalTimeInfo.tm_year + 1900, pMo = globalTimeInfo.tm_mon, pDy = globalTimeInfo.tm_mday, pHr = globalTimeInfo.tm_hour, pMn = globalTimeInfo.tm_min;
+    drawBTTFRow(ox, 32, getColor(0, 255, 0), "PRESENT TIME", bM[pMo], pDy, pYr, pHr, pMn, true);
+    drawBTTFRow(ox, 53, getColor(255, 200, 0), "LAST TIME DEPARTED", "NOV", 5, 1955, 6, 0, false);
+  } else if (type == 12) {
+    if (!ok) return;
+    unsigned long ms = millis();
+    uint16_t pipGreen = getColor(50, 255, 50), pipDark = getColor(10, 80, 10);
+    matrix.drawRoundRect(ox + 2, oy + 2, PANEL_RES_X - 4, PANEL_RES_Y - 4, 4, pipGreen);
+    matrix.drawRoundRect(ox + 3, oy + 3, PANEL_RES_X - 6, PANEL_RES_Y - 6, 4, pipDark);
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+    u8g2_fonts.setForegroundColor(pipGreen);
+    char timeStr[16];
+    strftime(timeStr, sizeof(timeStr), "%H:%M", tm_info);
+    u8g2_fonts.setCursor(ox + 90, oy + 52);
+    u8g2_fonts.print(timeStr);
+    u8g2_fonts.setFont(u8g2_font_5x7_tr);
+    u8g2_fonts.setCursor(ox + 10, oy + 12);
+    u8g2_fonts.print("ROBCO INDUSTRIES UNIFIED OPERATING SYSTEM");
+    u8g2_fonts.setCursor(ox + 10, oy + 22);
+    u8g2_fonts.print("COPYRIGHT 2075-2077 ROBCO INDUSTRIES");
+    int scanY = (ms / 30) % (PANEL_RES_Y - 4) + 2;
+    matrix.drawLine(ox + 2, oy + scanY, ox + PANEL_RES_X - 3, oy + scanY, getColor(100, 255, 100));
+  } else if (type == 13) {
+    if (!ok) return;
+    uint16_t predRed = getColor(255, 20, 20);
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+    u8g2_fonts.setForegroundColor(predRed);
+    char hStr[5], mStr[5];
+    strftime(hStr, sizeof(hStr), "%H", tm_info);
+    strftime(mStr, sizeof(mStr), "%M", tm_info);
+    u8g2_fonts.setCursor(ox + 80, oy + 42);
+    u8g2_fonts.print(hStr);
+    u8g2_fonts.setCursor(ox + 135, oy + 42);
+    u8g2_fonts.print(mStr);
+    if ((millis() / 500) % 2 == 0) { matrix.fillRect(ox + 124, oy + 24, 6, 18, predRed); }
+    u8g2_fonts.setFont(u8g2_font_unifont_t_symbols);
+    randomSeed(millis() / 200);
+    u8g2_fonts.drawGlyph(ox + 20, oy + 40, random(0x25A0, 0x25FF));
+    u8g2_fonts.drawGlyph(ox + 45, oy + 40, random(0x25A0, 0x25FF));
+    u8g2_fonts.drawGlyph(ox + 190, oy + 40, random(0x25A0, 0x25FF));
+    u8g2_fonts.drawGlyph(ox + 215, oy + 40, random(0x25A0, 0x25FF));
+    randomSeed(millis());
+  } else if (type == 14) {
+    if (!ok) return;
+    unsigned long ms = millis();
+    for (int x = 0; x < PANEL_RES_X; x += 6) {
+      int dropY = (ms / random(20, 60) + x * 12) % (PANEL_RES_Y + 20);
+      if (dropY < PANEL_RES_Y) {
+        matrix.drawLine(ox + x, oy + dropY, ox + x, oy + dropY - random(5, 15), getColor(0, 255, 0));
+        matrix.drawPixel(ox + x, oy + dropY, getColor(200, 255, 200));
+      }
+    }
+    char timeStr[16];
+    strftime(timeStr, sizeof(timeStr), "%H:%M", tm_info);
+    u8g2_fonts.setFont(u8g2_font_logisoso32_tn);
+    int tw = u8g2_fonts.getUTF8Width(timeStr);
+    u8g2_fonts.setForegroundColor(getColor(0, 0, 0));
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - tw) / 2 + 2, oy + 48 + 2);
+    u8g2_fonts.print(timeStr);
+    u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - tw) / 2, oy + 48);
+    u8g2_fonts.print(timeStr);
+  } else if (type == 15) {
+    if (!ok) return;
+    int cx = ox + 128, cy = oy + 32;
+    uint16_t sGold = getColor(255, 215, 0), sOrange = getColor(255, 100, 0), sRed = getColor(200, 0, 0), sBlack = getColor(0, 0, 0);
+    float pulse = sin(millis() / 300.0);
+
+    // 1. Огненная аура (растянута по горизонтали)
+    for (int j = 0; j < 360; j += 15) {
+      float r = 18 + random(0, 8) * pulse;
+      float rad = j * PI / 180.0;
+      // Умножаем X на 1.8, чтобы лучи летели в форме овала
+      matrix.drawLine(cx, cy, cx + cos(rad) * (r * 1.8), cy + sin(rad) * r, sRed);
+    }
+
+    // 2. Внешний овал Ока (оранжевый)
+    int h1 = 15;  // радиус по высоте
+    int w1 = 30;  // радиус по ширине
+    for (int y = -h1; y <= h1; y++) {
+      int xw = w1 * sqrt(1.0 - (float)(y * y) / (h1 * h1));
+      matrix.drawLine(cx - xw, cy + y, cx + xw, cy + y, sOrange);
+    }
+
+    // 3. Внутренний овал (золотой)
+    int h2 = 11;
+    int w2 = 22;
+    for (int y = -h2; y <= h2; y++) {
+      int xw = w2 * sqrt(1.0 - (float)(y * y) / (h2 * h2));
+      matrix.drawLine(cx - xw, cy + y, cx + xw, cy + y, sGold);
+    }
+
+    // 4. Узкий вертикальный зрачок
+    int pupilW = 4 + (pulse > 0 ? 2 : 0);  // Чуть-чуть пульсирует
+    int pupilH = 22;
+    matrix.fillRoundRect(cx - pupilW / 2, cy - pupilH / 2, pupilW, pupilH, 2, sBlack);
+
+    // 5. Вывод времени по бокам
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+    u8g2_fonts.setForegroundColor(sGold);
+    char hStr[5], mStr[5];
+    strftime(hStr, 5, "%H", tm_info);
+    strftime(mStr, 5, "%M", tm_info);
+    u8g2_fonts.setCursor(ox + 40, oy + 40);
+    u8g2_fonts.print(hStr);
+    u8g2_fonts.setCursor(ox + 180, oy + 40);
+    u8g2_fonts.print(mStr);
+  }
+  // ======= ЭКРАН 16: КИБЕРПАНК =======
+  else if (type == 16) {
+    if (!ok) return;
+    unsigned long ms = millis();
+    uint16_t gridColor = getColor(255, 0, 255);  // Неоновый розовый
+    uint16_t skyColor = getColor(0, 255, 255);   // Неоновый голубой
+    uint16_t bldColor = getColor(70, 15, 90);    // Сделали здания светлее (фиолетовый)
+    uint16_t winColor = getColor(255, 255, 0);   // Желтые окна
+
+    // 1. Движущиеся здания (бесконечный скроллинг)
+    int moveSpeed = ms / 40;  // Скорость города
+    for (int i = 0; i < (PANEL_RES_X / 20) + 2; i++) {
+      int chunk = (moveSpeed / 20) + i;
+      randomSeed(chunk);  // "Запоминаем" генерацию для каждого здания
+      int w = random(10, 25);
+      int h = random(10, 35);
+      int bx = ox + (i * 20) - (moveSpeed % 20);
+
+      // Силуэт здания
+      matrix.fillRect(bx, oy + 40 - h, w, h, bldColor);
+
+      // Рисуем светящиеся окна случайным образом
+      if (random(0, 3) != 0) {
+        matrix.fillRect(bx + w / 2 - 2, oy + 40 - h + 5, 2, 2, skyColor);
+        if (h > 20) matrix.fillRect(bx + w / 2 + 2, oy + 40 - h + 15, 2, 2, winColor);
+      }
+    }
+    randomSeed(ms);  // Возвращаем случайность остальному коду
+
+    // 2. Трехмерная сетка, едущая на нас
+    int gridOffset = (ms / 50) % 5;
+    for (int y = 40; y <= 64; y += ((y - 38) / 2) + 1) {
+      int drawY = oy + y + gridOffset;
+      if (drawY <= 64) matrix.drawLine(ox, drawY, ox + PANEL_RES_X, drawY, gridColor);
+    }
+    for (int i = -15; i < 15; i++) {
+      int xTop = ox + 128 + i * 15;
+      int xBot = ox + 128 + i * 50;
+      matrix.drawLine(xTop, oy + 40, xBot, oy + 64, gridColor);
+    }
+
+    // 3. Часы терминала поверх всего
+    char tStr[16];
+    strftime(tStr, sizeof(tStr), "%H:%M:%S", tm_info);
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+    int tw = u8g2_fonts.getUTF8Width(tStr);
+
+    // Черная полупрозрачная подложка, чтобы сетка не перекрывала цифры
+    matrix.fillRect(ox + (PANEL_RES_X - tw) / 2 - 4, oy + 8, tw + 8, 26, getColor(0, 0, 0));
+
+    u8g2_fonts.setForegroundColor(skyColor);
+    u8g2_fonts.setCursor(ox + (PANEL_RES_X - tw) / 2, oy + 32);
+    u8g2_fonts.print(tStr);
+  }
+  // ======= ЭКРАН 17: КОСМОС (WARP + РАДАР) =======
+  else if (type == 17) {
+    if (!ok) return;
+    int cx = ox + 128, cy = oy + 32;
+    uint16_t cRadar = getColor(0, 255, 100);
+
+    // 1. Анимация гиперпрыжка (звезды летят из центра на нас)
+    for (int i = 0; i < 120; i++) {
+      // Заставляем звезду лететь вперед и СОХРАНЯЕМ это!
+      stars[i].z -= (stars[i].speed * 15.0);
+
+      // Если звезда пролетела мимо нас (ушла за спину), рождаем ее снова вдали
+      if (stars[i].z <= 1) {
+        stars[i].x = random(-128, 128);
+        stars[i].y = random(-32, 32);
+        stars[i].z = 64;
+      }
+
+      // Текущая точка звезды на экране
+      int px = cx + (stars[i].x / stars[i].z * 30);
+      int py = cy + (stars[i].y / stars[i].z * 30);
+
+      // Вычисляем, где она была кадр назад, чтобы нарисовать "хвост" от скорости
+      float oldZ = stars[i].z + (stars[i].speed * 15.0);
+      int oldPx = cx + (stars[i].x / oldZ * 30);
+      int oldPy = cy + (stars[i].y / oldZ * 30);
+
+      // Рисуем световую линию полета
+      matrix.drawLine(oldPx, oldPy, px, py, getColor(200, 200, 255));
+    }
+
+    // 2. Радар и плавная сканирующая линия
+    matrix.drawCircle(cx, cy, 28, cRadar);
+    matrix.drawCircle(cx, cy, 27, getColor(0, 100, 0));
+
+    // Крутим радар (1 полный оборот за 3 секунды)
+    float rAngle = (millis() % 3000) / 3000.0 * 2 * PI;
+    matrix.drawLine(cx, cy, cx + cos(rAngle) * 28, cy + sin(rAngle) * 28, cRadar);
+
+    // 3. Вывод времени по центру радара
+    char tStr[16];
+    strftime(tStr, sizeof(tStr), "%H:%M", tm_info);
+    u8g2_fonts.setFont(u8g2_font_logisoso16_tn);
+    int tw = u8g2_fonts.getUTF8Width(tStr);
+
+    // Делаем черную подложку, чтобы летящие звезды не просвечивали сквозь цифры
+    matrix.fillRect(cx - tw / 2 - 2, cy - 10, tw + 4, 18, getColor(0, 20, 0));
+    u8g2_fonts.setForegroundColor(cRadar);
+    u8g2_fonts.setCursor(cx - tw / 2, cy + 6);
+    u8g2_fonts.print(tStr);
+  }
+  // ======= ЭКРАН 18: РЕТРО PONG =======
+  else if (type == 18) {
+    if (!ok) return;
+    static float bx = 128, by = 32, bvx = 3.5, bvy = 2.1;
+    static float pL = 32, pR = 32;
+    bx += bvx;
+    by += bvy;
+    if (by < 0 || by > 60) bvy = -bvy;
+    if (bx < 15) {
+      bvx = -bvx;
+      bx = 15;
+    }
+    if (bx > 241) {
+      bvx = -bvx;
+      bx = 241;
+    }
+    if (bvx < 0) pL += (by - pL) * 0.15;
+    if (bvx > 0) pR += (by - pR) * 0.15;
+    matrix.fillRect(ox + 10, oy + pL - 8, 4, 16, getColor(255, 255, 255));
+    matrix.fillRect(ox + 242, oy + pR - 8, 4, 16, getColor(255, 255, 255));
+    matrix.fillRect(ox + bx, oy + by, 4, 4, getColor(255, 255, 0));
+    for (int i = 0; i < 64; i += 8) matrix.drawLine(ox + 128, oy + i, ox + 128, oy + i + 4, getColor(100, 100, 100));
+    char hStr[5], mStr[5];
+    strftime(hStr, 5, "%H", tm_info);
+    strftime(mStr, 5, "%M", tm_info);
+    u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+    u8g2_fonts.setForegroundColor(getColor(120, 120, 120));
+    u8g2_fonts.setCursor(ox + 64, oy + 32);
+    u8g2_fonts.print(hStr);
+    u8g2_fonts.setCursor(ox + 160, oy + 32);
+    u8g2_fonts.print(mStr);
+  }
+  // ======= ЭКРАН 19: ИЛС (HUD) ИСТРЕБИТЕЛЯ F-16 =======
+  else if (type == 19) {
+    if (!ok) return;
+    unsigned long ms = millis();
+    uint16_t cGreen = getColor(0, 255, 50);  // Классический зеленый фосфор ИЛС
+    uint16_t cRed = getColor(255, 0, 0);     // Красный для захвата цели
+    int cx = ox + 128, cy = oy + 32;
+
+    // 1. Центральный маркер (Вектор скорости)
+    matrix.drawCircle(cx, cy, 4, cGreen);
+    matrix.drawLine(cx - 12, cy, cx - 4, cy, cGreen);
+    matrix.drawLine(cx + 4, cy, cx + 12, cy, cGreen);
+    matrix.drawLine(cx, cy - 12, cx, cy - 4, cGreen);
+
+    // 2. Авиагоризонт (Pitch Ladder) - плавно качается вверх/вниз
+    int pitch = sin(ms / 1000.0) * 15;
+    for (int i = -2; i <= 2; i++) {
+      if (i == 0) continue;
+      int yL = cy + pitch + (i * 14);
+      if (yL > 5 && yL < 60) {
+        matrix.drawLine(cx - 35, yL, cx - 15, yL, cGreen);
+        matrix.drawLine(cx + 15, yL, cx + 35, yL, cGreen);
+        // Засечки (наклонены к центру)
+        int tick = (i > 0) ? -3 : 3;
+        matrix.drawLine(cx - 35, yL, cx - 35, yL + tick, cGreen);
+        matrix.drawLine(cx + 35, yL, cx + 35, yL + tick, cGreen);
+      }
+    }
+
+    // 3. Боковые шкалы (Скорость и Высота) - бегущие ленты
+    matrix.drawLine(ox + 40, oy + 5, ox + 40, oy + 59, cGreen);
+    matrix.drawLine(ox + 216, oy + 5, ox + 216, oy + 59, cGreen);
+    int tape = (ms / 40) % 10;
+    for (int i = 0; i < 50; i += 10) {
+      int yLine = oy + 5 + i + tape;
+      if (yLine < 60) {
+        matrix.drawLine(ox + 40, yLine, ox + 45, yLine, cGreen);
+        matrix.drawLine(ox + 216, yLine, ox + 211, yLine, cGreen);
+      }
+    }
+
+    // 4. Текст шкал
+    u8g2_fonts.setFont(u8g2_font_5x7_tr);
+    u8g2_fonts.setForegroundColor(cGreen);
+    u8g2_fonts.setCursor(ox + 12, oy + 34);
+    u8g2_fonts.print("SPD");
+    u8g2_fonts.setCursor(ox + 224, oy + 34);
+    u8g2_fonts.print("ALT");
+    u8g2_fonts.setCursor(cx - 60, cy + 25);
+    u8g2_fonts.print("MACH 1.2");
+    u8g2_fonts.setCursor(cx + 30, cy + 25);
+    u8g2_fonts.print("G 4.5");
+
+    // 5. Мини-радар поиска цели в левом нижнем углу
+    int rx = ox + 16, ry = oy + 50;
+    matrix.drawCircle(rx, ry, 10, cGreen);
+    float rAngle = (ms % 2000) / 2000.0 * 2 * PI;
+    matrix.drawLine(rx, ry, rx + cos(rAngle) * 10, ry + sin(rAngle) * 10, cGreen);
+    if ((ms / 200) % 2 == 0) matrix.drawPixel(rx + 4, ry - 3, cRed);  // Враг на радаре!
+
+    // 6. Вывод времени в рамке "ЗАХВАТ ЦЕЛИ"
+    char tStr[16];
+    strftime(tStr, sizeof(tStr), "%H:%M:%S", tm_info);
+    u8g2_fonts.setFont(u8g2_font_logisoso16_tn);
+    int tw = u8g2_fonts.getUTF8Width(tStr);
+    int tx = cx - tw / 2, ty = oy + 16;
+
+    // Красная рамка захвата
+    matrix.drawRect(tx - 6, ty - 14, tw + 12, 18, cRed);
+    // Мигающая надпись LOCK
+    if ((ms / 250) % 2 == 0) {
+      u8g2_fonts.setFont(u8g2_font_5x7_tr);
+      u8g2_fonts.setForegroundColor(cRed);
+      u8g2_fonts.setCursor(tx + tw + 10, ty - 4);
+      u8g2_fonts.print("LOCK");
+    }
+
+    // Само время
+    u8g2_fonts.setFont(u8g2_font_logisoso16_tn);
+    u8g2_fonts.setForegroundColor(cGreen);
+    u8g2_fonts.setCursor(tx, ty);
+    u8g2_fonts.print(tStr);
+  }
+}
+
+void updateTerminatorLog() {
+  unsigned long ms = millis();
+  int scrollDelay = 80;
+  if (ms - lastTermScrollTime > scrollDelay) {
+    termScrollY += 1.0;
+    lastTermScrollTime = ms;
+    if (termScrollY >= 9.0) {
+      termScrollY = 0;
+      for (int i = TERM_LINES - 1; i > 0; i--) { termLog[i] = termLog[i - 1]; }
+      char timeStr[16] = "00:00:00", dateStr[16] = "00.00.0000";
+      if (globalTimeOk) {
+        strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &globalTimeInfo);
+        strftime(dateStr, sizeof(dateStr), "%d.%m.%Y", &globalTimeInfo);
+      }
+      termStep++;
+      int stepType = termStep % 7;
+      if (stepType == 0) termLog[0] = String(timeStr) + " RAM " + String(ESP.getFreeHeap() / 1024) + "K";
+      else if (stepType == 1) termLog[0] = "WIFI: " + String(WiFi.RSSI()) + " dBm";
+      else if (stepType == 2) termLog[0] = "DATE: " + String(dateStr);
+      else if (stepType == 3) termLog[0] = String(timeStr) + " SYS OK";
+      else if (stepType == 4) termLog[0] = "THREAT: LOW";
+      else if (stepType == 5) termLog[0] = "SCAN: ACTIVE";
+      else {
+        String rHex = "0x" + String(random(0x1000, 0xFFFF), HEX);
+        rHex.toUpperCase();
+        termLog[0] = "MEM: " + rHex;
+      }
+    }
+  }
+}
+
+void drawSleepyEyes(bool isSurprised) {
+  unsigned long ms = millis();
+  if (eyeType == 5) {
+    uint16_t termRed = getColor(255, 0, 0), termDimRed = getColor(180, 0, 0), termDarkRed = getColor(100, 0, 0), termWhite = getColor(255, 255, 255);
+    int cx = 64, cy = 32;
+    float zoom = isSurprised ? 0.6 : (1.0 + 0.15 * sin(ms / 400.0));
+    matrix.drawCircle(cx, cy, 26 * zoom, termDarkRed);
+    matrix.drawCircle(cx, cy, 25 * zoom, termDarkRed);
+    matrix.drawCircle(cx, cy, 18 * zoom, termRed);
+    matrix.drawCircle(cx, cy, 10 * zoom, termRed);
+    matrix.fillCircle(cx, cy, 5 * zoom, isSurprised ? termWhite : termRed);
+    matrix.drawLine(cx - 30, cy, cx - 12, cy, termDarkRed);
+    matrix.drawLine(cx + 12, cy, cx + 30, cy, termDarkRed);
+    matrix.drawLine(cx, cy - 30, cx, cy - 12, termDarkRed);
+    matrix.drawLine(cx, cy + 12, cx, cy + 30, termDarkRed);
+    if (isSurprised) {
+      u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+      u8g2_fonts.setForegroundColor(termRed);
+      if ((ms / 200) % 2 == 0) {
+        u8g2_fonts.setCursor(140, 28);
+        u8g2_fonts.print("WARNING:");
+        u8g2_fonts.setCursor(130, 48);
+        u8g2_fonts.print("INCOMING DATA");
+      }
+    } else {
+      u8g2_fonts.setFont(u8g2_font_5x7_tr);
+      for (int i = 0; i < TERM_LINES; i++) {
+        if (termLog[i].length() > 0) {
+          if (i <= 2) u8g2_fonts.setForegroundColor(termRed);
+          else if (i <= 5) u8g2_fonts.setForegroundColor(termDimRed);
+          else u8g2_fonts.setForegroundColor(termDarkRed);
+          int yPos = (i * 9) + (int)termScrollY + 7;
+          if (yPos > 6 && yPos <= 74) {
+            u8g2_fonts.setCursor(130, yPos);
+            u8g2_fonts.print(termLog[i]);
+          }
+        }
+      }
+    }
+    int scanSpeed = isSurprised ? 8 : 25;
+    int scanY = (ms / scanSpeed) % PANEL_RES_Y;
+    matrix.drawLine(0, scanY, PANEL_RES_X, scanY, termRed);
+    matrix.drawLine(0, scanY - 1, PANEL_RES_X, scanY - 1, termDarkRed);
+    return;
+  }
+
+  static unsigned long eyeLastBlink = 0, eyeLastLook = 0;
+  static float eyeLookTargetX = 0, eyeLookTargetY = 0, eyeLookCurrentX = 0, eyeLookCurrentY = 0;
+  static bool eyeIsBlinking = false;
+  static int eyeBlinkDuration = 300;
+  static float blinkDepth = 1.0;
+  if (isSurprised) {
+    eyeLookTargetX = 0;
+    eyeLookTargetY = 0;
+    eyeIsBlinking = false;
+  } else {
+    if (!eyeIsBlinking && ms - eyeLastBlink > random(5000, 15000)) {
+      eyeIsBlinking = true;
+      eyeLastBlink = ms;
+      if (random(0, 100) < 30) {
+        blinkDepth = (float)random(30, 60) / 100.0;
+        eyeBlinkDuration = random(150, 250);
+      } else {
+        blinkDepth = 1.0;
+        eyeBlinkDuration = random(300, 450);
+      }
+    }
+    if (ms - eyeLastLook > random(4000, 8000)) {
+      eyeLastLook = ms;
+      if (random(0, 3) == 0) {
+        eyeLookTargetX = 0;
+        eyeLookTargetY = 0;
+      } else {
+        eyeLookTargetX = random(-14, 15);
+        eyeLookTargetY = random(-5, 6);
+      }
+    }
+  }
+  eyeLookCurrentX += (eyeLookTargetX - eyeLookCurrentX) * 0.08;
+  eyeLookCurrentY += (eyeLookTargetY - eyeLookCurrentY) * 0.08;
+  float blinkP = 0;
+  if (eyeIsBlinking && !isSurprised) {
+    long t = ms - eyeLastBlink;
+    if (t > eyeBlinkDuration) {
+      eyeIsBlinking = false;
+      eyeLastBlink = ms;
+    } else {
+      if (t < eyeBlinkDuration / 2) blinkP = (float)t / (eyeBlinkDuration / 2);
+      else blinkP = 1.0 - (float)(t - eyeBlinkDuration / 2) / (eyeBlinkDuration / 2);
+      blinkP *= blinkDepth;
+    }
+  }
+  uint16_t eColor = hexToRGB565(eyeColorHex);
+  int cxL = PANEL_RES_X / 4, cxR = PANEL_RES_X * 3 / 4, cy = PANEL_RES_Y / 2, r = 26;
+
+  for (int i = 0; i < 2; i++) {
+    int cx = (i == 0) ? cxL : cxR;
+
+    if (eyeType == 0 || eyeType == 1) {
+      matrix.fillCircle(cx, cy, r, eColor);
+      if (eyeType == 0) {
+        int pR = isSurprised ? 6 : 11;
+        matrix.fillCircle(cx + (int)eyeLookCurrentX, cy + (int)eyeLookCurrentY, pR, 0);
+      } else {
+        int pW = isSurprised ? 4 : 10, pH = isSurprised ? 20 : 32;
+        matrix.fillRoundRect(cx + (int)eyeLookCurrentX - pW / 2, cy + (int)eyeLookCurrentY - pH / 2, pW, pH, pW / 2, 0);
+      }
+    } else if (eyeType == 6) {
+      int eyeW = 70, eyeH = 34;
+      int ex = cx - eyeW / 2;
+      int ey = cy - eyeH / 2 + 4;
+      matrix.fillRoundRect(ex, ey, eyeW, eyeH, 15, eColor);
+      int squint = isSurprised ? 0 : 10;
+      matrix.fillRect(ex, ey, eyeW, squint, 0);
+      int pW = isSurprised ? 8 : 12;
+      int pH = isSurprised ? 22 : 20;
+      int px = cx + (int)eyeLookCurrentX;
+      int py = cy + (int)eyeLookCurrentY + 4;
+      matrix.fillRoundRect(px - pW / 2, py - pH / 2 + (squint / 2), pW, pH, pW / 2, 0);
+      if (!isSurprised) {
+        matrix.fillCircle(px + 4, py - 4, 2, getColor(255, 255, 255));
+        matrix.fillCircle(px - 2, py + 3, 1, getColor(255, 255, 255));
+      }
+    } else if (eyeType == 2) {
+      matrix.drawCircle(cx, cy, r, eColor);
+      matrix.drawCircle(cx, cy, r - 1, eColor);
+      matrix.drawLine(cx - r, cy, cx + r, cy, eColor);
+      matrix.drawLine(cx, cy - r, cx, cy + r, eColor);
+      uint16_t coreC = isSurprised ? getColor(255, 0, 0) : getColor(255, 255, 255);
+      matrix.fillRect(cx + (int)eyeLookCurrentX - 5, cy + (int)eyeLookCurrentY - 5, 10, 10, coreC);
+    } else if (eyeType == 3) {
+      matrix.fillCircle(cx, cy, r, eColor);
+      int px = cx + (int)eyeLookCurrentX, py = cy + (int)eyeLookCurrentY, maxR = isSurprised ? 20 : 16;
+      for (int rad = 3; rad <= maxR; rad += 5) {
+        matrix.drawCircle(px, py, rad, 0);
+        matrix.drawCircle(px, py, rad + 1, 0);
+      }
+    } else if (eyeType == 4) {
+      int sqR = 24;
+      matrix.fillRect(cx - sqR, cy - sqR, sqR * 2, sqR * 2, eColor);
+      int pW = isSurprised ? 6 : 16;
+      matrix.fillRect(cx + (int)eyeLookCurrentX - pW / 2, cy + (int)eyeLookCurrentY - pW / 2, pW, pW, 0);
+    }
+
+    if (eyeType == 0 || eyeType == 1 || eyeType == 6) {
+      int glintX = cx + 5 + (int)(eyeLookCurrentX * 0.5);
+      int glintY = cy - 8 + (int)(eyeLookCurrentY * 0.5);
+      matrix.fillCircle(glintX, glintY, 2, getColor(255, 255, 255));
+    }
+
+    if (!isSurprised) {
+      if (eyeType == 4) {
+        int drop = 14 + (blinkP * (r + 4));
+        matrix.fillRect(cx - 26, cy - 26, 52, drop, 0);
+      } else if (eyeType == 6) {
+        int foxDrop = blinkP * 40;
+        matrix.fillRect(cx - 40, cy - 25, 80, foxDrop, 0);
+      } else {
+        int drop = 14 + (blinkP * (r + 4));
+        matrix.fillRect(cx - r - 2, cy - r - 2, (r * 2) + 4, drop, 0);
+      }
+    }
+  }
+}
+
+void configModeCallback(WiFiManager *myWiFiManager) {
+  apModeScroll = true;
+  xTaskCreatePinnedToCore([](void *p) {
+    String msg = " ВНИМАНИЕ! НЕТ СЕТИ Wi-Fi! Подключитесь к точке: Matrix_Setup (Пароль: 12345678) и перейдите по адресу 192.168.4.1 для настройки ";
+    int scX = PANEL_RES_X;
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    int w = u8g2_fonts.getUTF8Width(msg.c_str());
+    while (apModeScroll) {
+      matrix.fillScreen(0);
+      u8g2_fonts.setForegroundColor(matrix.color565(255, 100, 0));
+      u8g2_fonts.setCursor(scX, 36);
+      u8g2_fonts.print(msg);
+      matrix.show();
+      scX -= 1;
+      if (scX < -w) scX = PANEL_RES_X;
+      delay(20);
+    }
+    vTaskDelete(NULL);
+  },
+                          "AP_Scroll", 4096, NULL, 1, NULL, 0);
+}
+
+void setup() {
+  Serial.begin(115200);
+  matrix.begin();
+  u8g2_fonts.begin(matrix);
+  initEffects();
+  appliedBrightness = currentBrightness;
+  if (lis.begin(0x19) || lis.begin(0x18)) {
+    lis.setRange(LIS3DH_RANGE_4_G);
+    accelFound = true;
+    if (sandSim.begin()) sandSim.randomize();
+  }
+  SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  diagSD = SD.begin(SD_CS, SPI, 4000000);
+  mySerial1.begin(9600, SERIAL_8N1, DF_RX, DF_TX);
+  diagMP3 = myDFPlayer.begin(mySerial1);
+  if (diagMP3) {
+    myDFPlayer.volume(currentVolume);
+    delay(50);
+    myDFPlayer.playFolder(1, 27);
+  }
+  WiFiManager wm;
+  wm.setAPCallback(configModeCallback);
+  wm.setConfigPortalTimeout(180);
+  if (!wm.autoConnect("Matrix_Setup", "12345678")) {
+    delay(3000);
+    ESP.restart();
+  }
+  WiFi.setSleep(false);
+  apModeScroll = false;
+  delay(100);
+  diagWiFi = true;
+  delay(1000);
+  loadSettings();
+  configTime(3 * 3600, 0, "ru.pool.ntp.org", "pool.ntp.org");
+  ArduinoOTA.setHostname("ESP32Matrix");
+  ArduinoOTA.begin();
+  clockColor = hexToRGB565(clockColorHex);
+  textColor = hexToRGB565(textColorHex);
+  dateColor = hexToRGB565(dateColorHex);
+  buildScreenSequence();
+  server.on("/", handleRoot);
+  server.on("/update", HTTP_POST, handleUpdate);
+  server.begin();
+  updateTextWidth();
+  lastSwitchTime = millis();
+  lastDataUpdate = millis() - 900000;
+  lastTgCheck = millis() + 5000;
+  xTaskCreatePinnedToCore(networkTaskCode, "NetworkTask", 16384, NULL, 1, NULL, 0);
+  lastNewsShowTime = millis() - (newsIntervalMins * 60000UL) + 60000;
+  lastJokeShowTime = millis() - (jokeIntervalMins * 60000UL) + 150000;
+}
+
+void loop() {
+  updateTerminatorLog();
+  if (triggerGitHubUpdate) {
+    triggerGitHubUpdate = false;
+    matrix.fillScreen(0);
+    u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(getColor(0, 255, 255));
+    String s1 = "ОБНОВЛЕНИЕ!";
+    u8g2_fonts.setCursor((PANEL_RES_X - u8g2_fonts.getUTF8Width(s1.c_str())) / 2, 25);
+    u8g2_fonts.print(s1);
+    u8g2_fonts.setForegroundColor(getColor(255, 0, 0));
+    String s2 = "НЕ ВЫКЛЮЧАТЬ ПИТАНИЕ";
+    u8g2_fonts.setCursor((PANEL_RES_X - u8g2_fonts.getUTF8Width(s2.c_str())) / 2, 45);
+    u8g2_fonts.print(s2);
+    matrix.show();
+    delay(2000);
+    WiFiClientSecure client;
+    client.setInsecure();
+    httpUpdate.update(client, "https://raw.githubusercontent.com/" + githubRepo + "/main/firmware.bin");
+  }
+  ArduinoOTA.handle();
+  server.handleClient();
+  unsigned long ms = millis();
+  if (ms - lastTimeCheck > 200) {
+    bool timeWasOk = globalTimeOk;
+    globalTimeOk = getLocalTime(&globalTimeInfo, 0);
+    lastTimeCheck = ms;
+    if (!timeWasOk && globalTimeOk) {
+      calculateCountdown();
+      checkBirthdays();
+    }
+  }
+  if (globalTimeOk && globalTimeInfo.tm_min != lastBdayCheckMin) {
+    lastBdayCheckMin = globalTimeInfo.tm_min;
+    checkBirthdays();
+  }
+
+  bool isNightTime = forceNightMode;
+  if (!forceNightMode && globalTimeOk) {
+    int h = globalTimeInfo.tm_hour;
+    if (nightStartHour == nightEndHour) isNightTime = true;
+    else if (nightStartHour < nightEndHour) isNightTime = (h >= nightStartHour && h < nightEndHour);
+    else isNightTime = (h >= nightStartHour || h < nightEndHour);
+  }
+
+  bool dimScreenNow = (isNightTime && nightModeAuto);
+  bool showEyesNow = (isNightTime && nightEyesEnable) || forceTerminator;
+  int tb = currentBrightness;
+  if (dimScreenNow) tb = 25;
+  if (tb != appliedBrightness) {
+    appliedBrightness = tb;
+    clockColor = hexToRGB565(clockColorHex);
+    textColor = hexToRGB565(textColorHex);
+    dateColor = hexToRGB565(dateColorHex);
+  }
+  if (timerAlert) {
+    if (millis() - alertStartTime > 30000) {
+      timerAlert = false;
+    } else if (millis() - lastAlertSoundTime >= 4000) {
+      lastAlertSoundTime = millis();
+      if (diagMP3) {
+        myDFPlayer.volume(currentVolume);
+        delay(50);
+        myDFPlayer.playFolder(1, 26);
+      }
+    }
+  }
+  bool allowSound = !(nightSoundMute && isNightTime) && diagMP3;
+  if (globalTimeOk && globalTimeInfo.tm_min == 0 && globalTimeInfo.tm_sec == 0) {
+    if (lastChimeHour != globalTimeInfo.tm_hour) {
+      lastChimeHour = globalTimeInfo.tm_hour;
+      if (allowSound) {
+        int track = globalTimeInfo.tm_hour;
+        if (track == 0) track = 24;
+        myDFPlayer.volume(currentVolume);
+        delay(50);
+        myDFPlayer.playFolder(1, track);
+      }
+    }
+  }
+  if (newTelegramMessage) {
+    if (allowSound) {
+      myDFPlayer.volume(currentVolume);
+      delay(50);
+      myDFPlayer.playFolder(1, 25);
+    }
+    if (showEyesNow && currentScrollMode == SCROLL_NONE) {
+      if (eyeType == 5 || random(0, 2) == 0) {
+        eyeSurpriseMode = true;
+        eyeSurpriseStart = millis();
+        pendingTelegramAfterSurprise = true;
+      } else {
+        showEnvelopeAnim = true;
+        envelopeAnimStart = millis();
+      }
+    } else {
+      showEnvelopeAnim = true;
+      envelopeAnimStart = millis();
+    }
+    newTelegramMessage = false;
+  }
+  if (eyeSurpriseMode) {
+    if (millis() - eyeSurpriseStart > 2000) {
+      eyeSurpriseMode = false;
+      if (pendingTelegramAfterSurprise) {
+        showEnvelopeAnim = true;
+        envelopeAnimStart = millis();
+        pendingTelegramAfterSurprise = false;
+      }
+    }
+  }
+  if (showEnvelopeAnim) {
+    int envColor = getColor(255, 200, 50), envDark = getColor(180, 100, 0), paperColor = getColor(255, 255, 255);
+    int stage = (millis() - envelopeAnimStart) / 400;
+    int ew = 76, eh = 44, ex = (PANEL_RES_X - ew) / 2, ey = 18;
+    matrix.fillScreen(0);
+    if (stage >= 2) {
+      int paperY = ey - (stage - 1) * 12;
+      if (paperY < 2) paperY = 2;
+      matrix.fillRect(ex + 4, paperY, ew - 8, ey + eh - paperY, paperColor);
+      matrix.drawLine(ex + 12, paperY + 8, ex + ew - 12, paperY + 8, getColor(100, 100, 255));
+      matrix.drawLine(ex + 12, paperY + 14, ex + ew - 12, paperY + 14, getColor(100, 100, 255));
+      matrix.drawLine(ex + 12, paperY + 20, ex + ew - 24, paperY + 20, getColor(100, 100, 255));
+      matrix.fillTriangle(ex + ew / 2 - 8, paperY + 26, ex + ew / 2 + 10, paperY + 24, ex + ew / 2 - 2, paperY + 34, getColor(0, 150, 255));
+    }
+    matrix.fillRect(ex, ey, ew, eh, envColor);
+    matrix.drawRect(ex, ey, ew, eh, envDark);
+    matrix.drawLine(ex, ey + eh, ex + ew / 2, ey + eh / 2 + 4, envDark);
+    matrix.drawLine(ex + ew, ey + eh, ex + ew / 2, ey + eh / 2 + 4, envDark);
+    if (stage == 0) {
+      matrix.fillTriangle(ex, ey, ex + ew, ey, ex + ew / 2, ey + eh / 2 + 2, envColor);
+      matrix.drawLine(ex, ey, ex + ew / 2, ey + eh / 2 + 2, envDark);
+      matrix.drawLine(ex + ew, ey, ex + ew / 2, ey + eh / 2 + 2, envDark);
+    } else if (stage == 1) {
+      matrix.drawLine(ex, ey, ex + ew / 2, ey - eh / 2, envColor);
+      matrix.drawLine(ex + ew, ey, ex + ew / 2, ey - eh / 2, envColor);
+      matrix.drawLine(ex, ey, ex + ew, ey, envDark);
+    } else {
+      matrix.fillTriangle(ex, ey, ex + ew, ey, ex + ew / 2, ey - eh / 2 + 4, envColor);
+      matrix.drawLine(ex, ey, ex + ew / 2, ey - eh / 2 + 4, envDark);
+      matrix.drawLine(ex + ew, ey, ex + ew / 2, ey - eh / 2 + 4, envDark);
+      matrix.drawLine(ex, ey, ex + ew, ey, envDark);
+    }
+    matrix.show();
+    if (millis() - envelopeAnimStart > 3000) {
+      showEnvelopeAnim = false;
+      currentScrollSource = SRC_TELEGRAM;
+      updateTextWidth();
+      currentScrollMode = SCROLL_ONCE;
+      scrollX = PANEL_RES_X;
+    }
+    return;
+  }
+  if (currentScrollMode == SCROLL_NONE && !eyeSurpriseMode) {
+    bool isBdayTimeOk = (globalTimeOk && globalTimeInfo.tm_hour >= 9 && globalTimeInfo.tm_hour <= 21);
+    if (hasBirthdayToday && isBdayTimeOk && (ms - lastBdayScrollTime > 7200000UL || lastBdayScrollTime == 0)) {
+      currentScrollSource = SRC_BDAY;
+      currentText = " [party] Сегодня день Рождения: " + todayBirthdaysNames + "! Поздравляем! [party]   *** ";
+      updateTextWidth();
+      currentScrollMode = SCROLL_ONCE;
+      scrollX = PANEL_RES_X;
+      lastBdayScrollTime = ms;
+      if (allowSound) {
+        myDFPlayer.volume(currentVolume);
+        delay(50);
+        myDFPlayer.playFolder(1, random(28, 35));
+      }
+    } else if (showNewsFlag && (ms - lastNewsShowTime > (newsIntervalMins * 60000UL))) {
+      if (newsText.length() > 20) {
+        currentScrollSource = SRC_NEWS;
+        currentText = newsText;
+        updateTextWidth();
+        currentScrollMode = SCROLL_ONCE;
+        scrollX = PANEL_RES_X;
+        lastNewsShowTime = ms;
+      }
+    } else if (showJokeFlag && !needNewJoke && (ms - lastJokeShowTime > (jokeIntervalMins * 60000UL))) {
+      if (jokeText.length() > 20) {
+        currentScrollSource = SRC_JOKE;
+        currentText = jokeText;
+        updateTextWidth();
+        currentScrollMode = SCROLL_ONCE;
+        scrollX = PANEL_RES_X;
+        lastJokeShowTime = ms;
+        needNewJoke = true;
+        if (allowSound) {
+          myDFPlayer.volume(currentVolume);
+          delay(50);
+          myDFPlayer.playFolder(1, 28);
+        }
+      }
+    }
+  }
+  if (currentScrollMode == SCROLL_NONE && numActiveScreens > 0) {
+    if (!showEyesNow || eyeSurpriseMode) {
+      if (!isAnimating && !eyeSurpriseMode) {
+        int t_sec = 5;
+        if (activeScreens[currentScreenIdx] == 0) t_sec = clockShowSec;
+        else if (activeScreens[currentScreenIdx] == 1) t_sec = weatherShowSec;
+        else if (activeScreens[currentScreenIdx] == 2) t_sec = extWeatherShowSec;
+        else if (activeScreens[currentScreenIdx] == 3) t_sec = currencyShowSec;
+        else if (activeScreens[currentScreenIdx] == 4) t_sec = countdownShowSec;
+        else if (activeScreens[currentScreenIdx] == 5) t_sec = graphShowSec;
+        else if (activeScreens[currentScreenIdx] == 6) t_sec = sunShowSec;
+        else if (activeScreens[currentScreenIdx] == 8) t_sec = carDashShowSec;
+        else if (activeScreens[currentScreenIdx] == 9) t_sec = bdayPhotoShowSec;
+        else if (activeScreens[currentScreenIdx] == 10) t_sec = terminatorShowSec;
+        else if (activeScreens[currentScreenIdx] == 11) t_sec = bttfShowSec;
+        else if (activeScreens[currentScreenIdx] == 12) t_sec = pipBoyShowSec;
+        else if (activeScreens[currentScreenIdx] == 13) t_sec = predatorShowSec;
+        else if (activeScreens[currentScreenIdx] == 14) t_sec = matrixShowSec;
+        else if (activeScreens[currentScreenIdx] == 15) t_sec = sauronShowSec;
+        else if (activeScreens[currentScreenIdx] == 16) t_sec = cyberShowSec;
+        else if (activeScreens[currentScreenIdx] == 17) t_sec = spaceShowSec;
+        else if (activeScreens[currentScreenIdx] == 18) t_sec = pongShowSec;
+        else if (activeScreens[currentScreenIdx] == 19) t_sec = f16ShowSec;
+
+        if (ms - lastSwitchTime >= t_sec * 1000) {
+          nextScreenIdx = (currentScreenIdx + 1) % numActiveScreens;
+          if (currentScreenIdx != nextScreenIdx) {
+            isAnimating = true;
+            animStartTime = ms;
+            if (animType == 6) activeAnimType = random(0, 6);
+            else if (animType == 19) activeAnimType = random(0, 19);
+            else activeAnimType = animType;
+            currentBdayImage = random(1, 6);
+          } else {
+            lastSwitchTime = ms;
+          }
+        }
+      }
+    }
+  }
+  matrix.fillScreen(0);
+  if (currentScrollMode != SCROLL_NONE) {
+    if (currentScrollSource != SRC_TELEGRAM && globalTimeOk) {
+      char timeStr[16];
+      strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &globalTimeInfo);
+      u8g2_fonts.setFont(u8g2_font_logisoso24_tr);
+      u8g2_fonts.setForegroundColor(clockColor);
+      u8g2_fonts.setCursor((PANEL_RES_X - u8g2_fonts.getUTF8Width(timeStr)) / 2, 28);
+      u8g2_fonts.print(timeStr);
+    }
+    u8g2_fonts.setFont(isLargeText ? u8g2_font_inr27_t_cyrillic : u8g2_font_cu12_t_cyrillic);
+    u8g2_fonts.setForegroundColor(textColor);
+    drawMixedText(currentText, scrollX, (currentScrollSource != SRC_TELEGRAM) ? 58 : (isLargeText ? 42 : 38));
+    int activeScrollSpeed = scrollSpeed;
+    if (currentScrollSource == SRC_NEWS || currentScrollSource == SRC_JOKE) activeScrollSpeed = newsScrollSpeed;
+    else if (currentScrollSource == SRC_BDAY) activeScrollSpeed = bdayScrollSpeed;
+    if (ms - lastScrollUpdate > activeScrollSpeed) {
+      lastScrollUpdate = ms;
+      scrollX -= 2;
+      if (scrollX < -textWidth) {
+        currentScrollMode = SCROLL_NONE;
+        scrollX = PANEL_RES_X;
+        currentScrollSource = SRC_TELEGRAM;
+        currentText = "Жду сообщений!";
+      }
+    }
+  } else {
+    if (eyeSurpriseMode || showEyesNow) {
+      drawSleepyEyes(eyeSurpriseMode);
+    } else {
+      int activeEffect = currentEffectIdx;
+      if (activeEffect == 10 && dataLoaded) {
+        if (weatherIconCode.indexOf("13") != -1) activeEffect = 2;
+        else if (weatherIconCode.indexOf("09") != -1 || weatherIconCode.indexOf("10") != -1 || weatherIconCode.indexOf("11") != -1) activeEffect = 11;
+        else if (weatherIconCode.indexOf("n") != -1) activeEffect = 4;
+        else activeEffect = 1;
+      }
+      if (activeEffect == 0) {
+        if (globalTimeOk) {
+          int m = globalTimeInfo.tm_mon + 1;
+          int d = globalTimeInfo.tm_mday;
+          if ((m == 12 && d >= 25) || (m == 1 && d <= 7)) activeEffect = 2;
+          else if ((m == 2 && d == 23) || (m == 3 && d == 8) || (m == 5 && d == 9)) activeEffect = 5;
+          else activeEffect = 1;
+        } else {
+          activeEffect = 1;
+        }
+      }
+
+      // Рисуем фоновые эффекты ТОЛЬКО для экранов с типом <= 8
+      int currentType = activeScreens[currentScreenIdx];
+      if (currentType >= 0 && currentType <= 8) {
+        switch (activeEffect) {
+          case 2: updateSnow(); break;
+          case 3: updateMatrix(); break;
+          case 4: updateStars(); break;
+          case 5: updateFireworks(); break;
+          case 6: update3DCube(); break;
+          case 7: update3DPyramid(); break;
+          case 8: updateBalls(); break;
+          case 9: updateWaves(); break;
+          case 11: updateRain(); break;
+          case 12: updateSand(); break;
+        }
+      }
+
+      if (isAnimating) {
+        int duration = 450;
+        if (activeAnimType == 7) duration = 2000;
+        else if (activeAnimType == 8) duration = 1200;
+        else if (activeAnimType == 9) duration = 1000;
+        else if (activeAnimType == 10) duration = 1500;
+        else if (activeAnimType == 11) duration = 1500;
+        else if (activeAnimType == 12) duration = 2000;
+        else if (activeAnimType == 13) duration = 1000;
+        else if (activeAnimType == 14) duration = 1500;
+        else if (activeAnimType == 15) duration = 1200;
+        else if (activeAnimType == 16) duration = 1000;
+        else if (activeAnimType == 17) duration = 1500;
+        else if (activeAnimType == 18) duration = 1500;
+        float p = (float)(ms - animStartTime) / duration;
+        if (p >= 1.0) {
+          p = 1.0;
+          isAnimating = false;
+          currentScreenIdx = nextScreenIdx;
+          lastSwitchTime = ms;
+        }
+        if (activeAnimType <= 5) {
+          int cx1 = 0, cy1 = 0, cx2 = 0, cy2 = 0;
+          int maxW = PANEL_RES_X, maxH = PANEL_RES_Y;
+          switch (activeAnimType) {
+            case 0:
+              cy1 = -(p * maxH);
+              cy2 = maxH + cy1;
+              break;
+            case 1:
+              cx1 = -(p * maxW);
+              cx2 = maxW + cx1;
+              break;
+            case 2:
+              cy1 = (p * maxH);
+              cy2 = -maxH + cy1;
+              break;
+            case 3:
+              cx1 = (p * maxW);
+              cx2 = -maxW + cx1;
+              break;
+            case 4:
+              cx1 = -(p * maxW);
+              cy1 = -(p * maxH);
+              cx2 = maxW + cx1;
+              cy2 = maxH + cy1;
+              break;
+            case 5:
+              cx1 = (p * maxW);
+              cy1 = (p * maxH);
+              cx2 = -maxW + cx1;
+              cy2 = -maxH + cy1;
+              break;
+          }
+          drawScreen(activeScreens[currentScreenIdx], cx1, cy1, &globalTimeInfo, globalTimeOk);
+          drawScreen(activeScreens[nextScreenIdx], cx2, cy2, &globalTimeInfo, globalTimeOk);
+        } else {
+          if (p < 0.5 && activeAnimType != 7 && activeAnimType != 11 && activeAnimType != 13 && activeAnimType != 14 && activeAnimType != 16 && activeAnimType != 17 && activeAnimType != 18) {
+            drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+          } else if (p >= 0.5 && activeAnimType != 7 && activeAnimType != 11 && activeAnimType != 13 && activeAnimType != 14 && activeAnimType != 16 && activeAnimType != 17 && activeAnimType != 18) {
+            drawScreen(activeScreens[nextScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+          }
+          if (activeAnimType == 7) {
+            int px = p * (PANEL_RES_X + 60) - 30;
+            if (p < 0.5) {
+              drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              matrix.fillRect(0, 0, px, PANEL_RES_Y, 0);
+            } else {
+              drawScreen(activeScreens[nextScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              matrix.fillRect(px, 0, PANEL_RES_X - px, PANEL_RES_Y, 0);
+            }
+            matrix.fillCircle(px, 32, 20, getColor(255, 255, 0));
+            int mouthAngle = abs((int)((millis() / 20) % 30) - 15);
+            matrix.fillTriangle(px, 32, px + 25, 32 - 10 - mouthAngle, px + 25, 32 + 10 + mouthAngle, 0);
+          } else if (activeAnimType == 8) {
+            int w = (p < 0.5) ? (p * 2 * (PANEL_RES_X / 2)) : ((1.0 - p) * 2 * (PANEL_RES_X / 2));
+            matrix.fillRect(0, 0, w, PANEL_RES_Y, 0);
+            matrix.fillRect(PANEL_RES_X - w, 0, w, PANEL_RES_Y, 0);
+            matrix.drawLine(w, 0, w, PANEL_RES_Y, getColor(0, 255, 255));
+            matrix.drawLine(PANEL_RES_X - w - 1, 0, PANEL_RES_X - w - 1, PANEL_RES_Y, getColor(0, 255, 255));
+          } else if (activeAnimType == 9) {
+            if (p < 0.4) {
+              int hy = (p / 0.4) * 40;
+              matrix.fillRect(PANEL_RES_X / 2 - 20, hy - 25, 40, 25, getColor(120, 120, 120));
+              matrix.fillRect(PANEL_RES_X / 2 - 4, hy - 50, 8, 25, getColor(100, 50, 0));
+            } else if (p >= 0.4 && p < 0.6) {
+              matrix.fillScreen(getColor(200, 255, 255));
+              for (int i = 0; i < 8; i++) matrix.drawLine(PANEL_RES_X / 2, 32, random(PANEL_RES_X), random(PANEL_RES_Y), getColor(255, 255, 255));
+            }
+          } else if (activeAnimType == 10) {
+            int noiseCount = (p < 0.5) ? (p * 2 * 10000) : ((1.0 - p) * 2 * 10000);
+            for (int i = 0; i < noiseCount; i++) matrix.drawPixel(random(PANEL_RES_X), random(PANEL_RES_Y), 0);
+          } else if (activeAnimType == 11) {
+            int rx = p * PANEL_RES_X;
+            if (p < 0.5) {
+              drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              matrix.fillRect(0, 0, rx, PANEL_RES_Y, 0);
+            } else {
+              drawScreen(activeScreens[nextScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              matrix.fillRect(rx, 0, PANEL_RES_X - rx, PANEL_RES_Y, 0);
+            }
+            matrix.drawLine(rx, 0, rx, PANEL_RES_Y, getColor(0, 255, 0));
+            matrix.drawLine(rx - 1, 0, rx - 1, PANEL_RES_Y, getColor(0, 150, 0));
+          } else if (activeAnimType == 12) {
+            int wy = p * PANEL_RES_Y * 2;
+            if (wy <= PANEL_RES_Y) {
+              matrix.fillRect(0, 0, PANEL_RES_X, wy, 0);
+              for (int i = 0; i < PANEL_RES_X; i += random(2, 6)) {
+                if (wy + random(-10, 5) < PANEL_RES_Y) matrix.drawLine(i, wy, i, wy - random(5, 15), getColor(0, 255, 0));
+              }
+            }
+          } else if (activeAnimType == 13) {
+            if (p < 0.5) {
+              int offset = (p * 2.0) * 15.0;
+              drawScreen(activeScreens[currentScreenIdx], random(-offset, offset), random(-offset, offset), &globalTimeInfo, globalTimeOk);
+            } else {
+              int offset = ((1.0 - p) * 2.0) * 15.0;
+              drawScreen(activeScreens[nextScreenIdx], random(-offset, offset), random(-offset, offset), &globalTimeInfo, globalTimeOk);
+            }
+          } else if (activeAnimType == 14) {
+            if (p < 0.5) {
+              drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              for (int x = 0; x < PANEL_RES_X; x++) {
+                int h = (p * 2.0) * PANEL_RES_Y + random(-15, 15);
+                if (h > 0) matrix.drawLine(x, 0, x, h, 0);
+              }
+            } else {
+              drawScreen(activeScreens[nextScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              for (int x = 0; x < PANEL_RES_X; x++) {
+                int h = ((1.0 - p) * 2.0) * PANEL_RES_Y + random(-15, 15);
+                if (h > 0) matrix.drawLine(x, PANEL_RES_Y - h, x, PANEL_RES_Y, 0);
+              }
+            }
+          } else if (activeAnimType == 15) {
+            if (p < 0.3) {
+              drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              int h = (p / 0.3) * (PANEL_RES_Y / 2);
+              matrix.fillRect(0, 0, PANEL_RES_X, h, 0);
+              matrix.fillRect(0, PANEL_RES_Y - h, PANEL_RES_X, h, 0);
+            } else if (p < 0.4) {
+              matrix.drawLine(0, PANEL_RES_Y / 2, PANEL_RES_X, PANEL_RES_Y / 2, getColor(255, 255, 255));
+            } else if (p < 0.6) {
+              matrix.fillCircle(PANEL_RES_X / 2, PANEL_RES_Y / 2, 2, getColor(255, 255, 255));
+            } else if (p < 0.7) {
+              matrix.drawLine(0, PANEL_RES_Y / 2, PANEL_RES_X, PANEL_RES_Y / 2, getColor(255, 255, 255));
+            } else {
+              drawScreen(activeScreens[nextScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              int h = ((1.0 - p) / 0.3) * (PANEL_RES_Y / 2);
+              matrix.fillRect(0, 0, PANEL_RES_X, h, 0);
+              matrix.fillRect(0, PANEL_RES_Y - h, PANEL_RES_X, h, 0);
+            }
+          } else if (activeAnimType == 16) {
+            if (p < 0.7) {
+              int rx = random(-20, 20);
+              drawScreen(activeScreens[currentScreenIdx], rx, 0, &globalTimeInfo, globalTimeOk);
+              for (int i = 0; i < 8; i++) {
+                matrix.fillRect(random(PANEL_RES_X), random(PANEL_RES_Y), random(20, 80), random(2, 6), 0);
+                matrix.fillRect(random(PANEL_RES_X), random(PANEL_RES_Y), random(10, 50), random(1, 3), getColor(0, 255, 255));
+                matrix.fillRect(random(PANEL_RES_X), random(PANEL_RES_Y), random(10, 50), random(1, 3), getColor(255, 0, 255));
+              }
+            } else {
+              drawScreen(activeScreens[nextScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+            }
+          } else if (activeAnimType == 17) {
+            int lx = p * (PANEL_RES_X + PANEL_RES_Y) - PANEL_RES_Y;
+            if (p < 0.5) {
+              drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              for (int y = 0; y < PANEL_RES_Y; y++) {
+                int x = lx + y;
+                matrix.drawLine(0, y, x, y, 0);
+              }
+            } else {
+              drawScreen(activeScreens[nextScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              for (int y = 0; y < PANEL_RES_Y; y++) {
+                int x = lx + y;
+                matrix.drawLine(x, y, PANEL_RES_X, y, 0);
+              }
+            }
+            matrix.drawLine(lx, 0, lx + PANEL_RES_Y, PANEL_RES_Y, getColor(255, 0, 0));
+            matrix.drawLine(lx - 1, 0, lx + PANEL_RES_Y - 1, PANEL_RES_Y, getColor(255, 100, 100));
+          } else if (activeAnimType == 18) {
+            int sections = 8, secW = PANEL_RES_X / sections;
+            if (p < 0.5) {
+              drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              int bw = (p * 2.0) * secW;
+              for (int i = 0; i < sections; i++) { matrix.fillRect(i * secW + (secW - bw) / 2, 0, bw, PANEL_RES_Y, 0); }
+            } else {
+              drawScreen(activeScreens[nextScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+              int bw = ((1.0 - p) * 2.0) * secW;
+              for (int i = 0; i < sections; i++) { matrix.fillRect(i * secW + (secW - bw) / 2, 0, bw, PANEL_RES_Y, 0); }
+            }
+          }
+        }
+      } else {
+        drawScreen(activeScreens[currentScreenIdx], 0, 0, &globalTimeInfo, globalTimeOk);
+      }
+    }
+  }
+
+  if (timerActive) {
+    long r = (timerEndTime - ms) / 1000;
+    if (r <= 0) {
+      timerActive = false;
+      timerAlert = true;
+      alertStartTime = millis();
+      lastAlertSoundTime = 0;
+    } else {
+      u8g2_fonts.setFont(u8g2_font_cu12_t_cyrillic);
+      u8g2_fonts.setForegroundColor(getColor(255, 255, 255));
+      u8g2_fonts.setCursor(2, 12);
+      u8g2_fonts.printf("%02d:%02d", (int)r / 60, (int)r % 60);
+    }
+  }
+
+  matrix.show();
+}
